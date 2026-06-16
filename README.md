@@ -1,6 +1,6 @@
 # Control Tower
 
-A self-updating ops console for everything running in a MotherDuck database — the
+A self-updating ops console for everything running in your MotherDuck account — the
 data-flow graph of your dives, flights, tables, and shares, drawn automatically
 from metadata you write into the objects themselves.
 
