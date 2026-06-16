@@ -1,0 +1,11 @@
+{
+  "name": "control-tower-manifest-sync",
+  "type": "flight",
+  "env": "default",
+  "title": "Control Tower Manifest Sync",
+  "description": "Parses every deployed dive/flight's @manifest and materializes the ct_* graph tables.",
+  "id": null,
+  "database": "YOUR_DATABASE",
+  "schedule_cron": "30 13 * * *",
+  "access_token_name": "<your-read-write-token>"
+}

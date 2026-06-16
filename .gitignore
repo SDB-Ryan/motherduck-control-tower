@@ -1,0 +1,12 @@
+# Secrets — never commit a token
+.env
+**/.env
+
+# Python
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

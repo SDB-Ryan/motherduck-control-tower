@@ -1,0 +1,10 @@
+{
+  "name": "control-tower",
+  "type": "dive",
+  "env": "default",
+  "title": "Control Tower",
+  "description": "Manifest-driven ops console: graph rendered from ct_objects/ct_edges/ct_issues.",
+  "id": null,
+  "database": "YOUR_DATABASE",
+  "share": ""
+}
