@@ -4,6 +4,8 @@ A self-updating ops console for everything running in your MotherDuck account â€
 data-flow graph of your dives, flights, tables, and shares, drawn automatically
 from metadata you write into the objects themselves.
 
+![Control Tower mapping a MotherDuck account's data flow](docs/control-tower.png)
+
 You annotate each dive and flight with a small `@manifest` comment block declaring
 what it reads, writes, and delivers. A scheduled **manifest-sync** flight parses
 all of them and materializes the graph as tables (`ct_objects`, `ct_edges`,
