@@ -189,16 +189,21 @@ def enumerate_objects(con):
 
 # ── graph build (the resolution rules) ───────────────────────────────────
 
-def build_graph(objects, shares):
+def build_graph(objects, shares, hidden_keys=frozenset()):
     """objects: list of (kind, identity, source, deployed_schedule,
     last_run_ts, last_run_status).
     shares: list of (share_name, source_db_name) from the catalog.
+    hidden_keys: object keys ('kind:identity') to exclude entirely — no node
+    and no issue (e.g. account marker dives). See ct_hidden / sync-hidden.py.
     Returns (nodes, edges, issues)."""
     issues = []
     parsed = []  # (manifest, deployed_schedule, last_run_ts, last_run_status)
 
     for kind, identity, source, deployed_schedule, last_run_ts, \
             last_run_status in objects:
+        # Intentionally hidden objects produce no node and no issue.
+        if f"{kind}:{identity}" in hidden_keys:
+            continue
         manifest, parse_err = parse_manifest(source)
         if parse_err:
             issues.append(dict(severity="error", object_key=f"{kind}:{identity}",
@@ -390,6 +395,15 @@ def ensure_ledger(con):
         " run_ts TIMESTAMPTZ, status VARCHAR, detail VARCHAR, error VARCHAR)")
 
 
+def ensure_hidden(con):
+    # Objects intentionally excluded from the graph + issues (e.g. account
+    # marker dives). Populated out-of-band (sync-hidden.py); persists across
+    # runs — the flight only CREATE-OR-REPLACEs ct_objects/edges/issues.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS ct_hidden ("
+        " object_key VARCHAR, reason VARCHAR, hidden_at TIMESTAMPTZ)")
+
+
 def write_ledger(con, status, detail="", error=""):
     con.execute(f"INSERT INTO {LEDGER} VALUES (?, ?, ?, ?)",
                 [datetime.now(timezone.utc), status, detail, error])
@@ -401,6 +415,7 @@ def main():
     # TIMESTAMPTZ fetches — pin the session before touching timestamps.
     con.execute("SET TimeZone='UTC'")
     ensure_ledger(con)
+    ensure_hidden(con)
     try:
         objects = enumerate_objects(con)
         print(f"enumerated {len(objects)} deployed objects:")
@@ -413,7 +428,12 @@ def main():
             "SELECT name, source_db_name FROM MD_LIST_DATABASE_SHARES()"
         ).fetchall()
 
-        nodes, edges, issues = build_graph(objects, shares)
+        hidden_keys = {r[0] for r in con.execute(
+            "SELECT object_key FROM ct_hidden").fetchall()}
+        if hidden_keys:
+            print(f"hiding {len(hidden_keys)} object(s): "
+                  + ", ".join(sorted(hidden_keys)))
+        nodes, edges, issues = build_graph(objects, shares, hidden_keys)
         synced_at = datetime.now(timezone.utc)
         write_graph(con, nodes, edges, issues, synced_at)
 

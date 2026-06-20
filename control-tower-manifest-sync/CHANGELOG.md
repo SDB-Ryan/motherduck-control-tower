@@ -1,5 +1,11 @@
 # Changelog — Manifest Sync
 
+## 2026-06-20 · Hidden objects
+The sync reads a `ct_hidden` table (`object_key`, `reason`) and skips those objects
+entirely — no node and no issue. `ct_hidden` is created with `CREATE TABLE IF NOT
+EXISTS` and persists across runs (only `ct_objects`/`ct_edges`/`ct_issues` are
+rebuilt each run), so hiding is durable.
+
 ## 2026-06-19 · Run-history health
 Flight health now comes from the platform's run history instead of a data ledger:
 the sync reads each flight's latest run via `MD_LIST_FLIGHT_RUNS` and writes

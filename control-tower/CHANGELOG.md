@@ -1,5 +1,11 @@
 # Changelog — Control Tower
 
+## 2026-06-20 · Hidden objects
+Objects listed in a `ct_hidden` table are excluded from the graph and the issues
+strip, and shown in a muted "Hidden" section at the bottom so the exclusion stays
+visible rather than silent — for objects you intentionally don't track (e.g. an
+account marker dive).
+
 ## 2026-06-19 · Run-history health + views
 Flight status dot and "last run" now read from run history (`last_run_ts` /
 `last_run_status` in `ct_objects`) rather than a data ledger; staleness is opt-in

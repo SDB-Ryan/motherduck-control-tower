@@ -363,6 +363,11 @@ export default function ControlTowerV2() {
     SELECT severity, object_key, kind, detail FROM "${DB}"."main"."ct_issues"
     ORDER BY severity, object_key
   `);
+  // Objects intentionally excluded from the graph + issues (see ct_hidden).
+  const hiddenQ = useSQLQuery(`
+    SELECT object_key, reason FROM "${DB}"."main"."ct_hidden"
+    ORDER BY object_key
+  `);
   const syncQ = useSQLQuery(`
     SELECT strftime(max(run_ts), '%b %d %H:%M') AS synced_at,
            any_value(status ORDER BY run_ts DESC) AS status,
@@ -610,6 +615,7 @@ export default function ControlTowerV2() {
   }, [nodes, allEdges, byId, activeApp, view]);
 
   const issues = Array.isArray(issuesQ.data) ? (issuesQ.data as any[]) : [];
+  const hidden = Array.isArray(hiddenQ.data) ? (hiddenQ.data as any[]) : [];
   const syncRow = Array.isArray(syncQ.data) ? (syncQ.data as any[])[0] : undefined;
 
   const appStatus = (app: string): Status => {
@@ -1004,6 +1010,33 @@ export default function ControlTowerV2() {
           </div>
         ) : null}
       </div>
+
+      {/* Hidden objects — intentionally excluded from the graph + issues */}
+      {hidden.length ? (
+        <div style={{ marginTop: 20 }}>
+          <div
+            style={{
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: C.muted,
+              fontFamily: NUM_FONT,
+              marginBottom: 6,
+            }}
+          >
+            Hidden ({hidden.length})
+          </div>
+          {hidden.map((h, k) => (
+            <div
+              key={k}
+              style={{ fontSize: 12, fontFamily: NUM_FONT, color: C.muted, padding: "2px 0" }}
+            >
+              <strong style={{ color: C.text }}>{String(h.object_key)}</strong>
+              {h.reason ? ` — ${String(h.reason)}` : ""}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {/* Sync footer */}
       <p style={{ fontSize: 11, color: C.muted, fontFamily: NUM_FONT, marginTop: 16 }}>
