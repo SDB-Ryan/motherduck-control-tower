@@ -41,6 +41,52 @@ Shipped alongside this document:
 Both carry a `YOUR_DATABASE` placeholder you stamp with the target database in
 Step 1.
 
+## How to run the commands in this guide (pick one before Preflight)
+
+Every step below is plain MotherDuck SQL. Two ways to drive it — choose now,
+because it changes how the `read_text(...)` steps work.
+
+**Recommended — a local `duckdb` CLI.** One warm connection, and `read_text(...)`
+loads the source files from disk verbatim (no hand-escaping). An install
+redeploys the flight and dive several times, so this is meaningfully faster and
+less error-prone than the MCP.
+
+- Make sure the CLI is present — you (the assistant) can install it *with the
+  user's OK*; it's a single self-contained binary, no Python required:
+  ```bash
+  command -v duckdb || (brew install duckdb 2>/dev/null || curl https://install.duckdb.org | sh)
+  ```
+- Connect with the user's token, running the CLI **from the folder that holds
+  `flight.py` / `dive.tsx`** so `read_text('flight.py')` resolves to the real file:
+  ```bash
+  duckdb 'md:?motherduck_token=<token>'      # or: export motherduck_token=… ; duckdb md:
+  ```
+  The `motherduck` extension auto-installs on first `md:` use.
+
+  > **CLI version matters.** MotherDuck only accepts a supported DuckDB version —
+  > as of this writing the newest supported is **1.5.3**, and a *newer* CLI is
+  > rejected at connect with "DuckDB version … is not yet supported by
+  > MotherDuck." `brew install duckdb` may give you a too-new release (it
+  > installed 1.5.4 here). If the connection is refused, grab the 1.5.3 CLI
+  > directly from the DuckDB GitHub releases. (This is separate from the
+  > `duckdb==1.5.3` pin in `requirements.txt`, which is the *flight container's*.)
+
+**Fallback — the MotherDuck MCP.** Zero extra setup if it's already connected to
+your assistant, but two caveats this guide's SQL assumes you've handled:
+
+- **`read_text()` will NOT work over the MCP.** The MCP runs SQL *server-side*,
+  where your local files don't exist, so `read_text('flight.py')` finds nothing.
+  Wherever a step uses `read_text(...)`, skip the `SET VARIABLE … read_text(…)`
+  line and pass the file contents **inline** via the MCP's `create_flight` /
+  `update_flight` / `save_dive` / `update_dive` tools (each takes the source as a
+  string argument).
+- **It's slower and escaping-prone.** Every call is a multi-second round trip and
+  you hand-escape the full source (30–40 KB of TSX) as a tool argument — a real
+  cause of failed pushes. For an iterative install, prefer the local CLI.
+
+If the CLI one-liner can't run (locked-down machine, no `brew`/`curl`), use the
+MCP fallback.
+
 ## Preflight — can we install? (do this before anything else)
 
 Establish three things, in order. If one fails, STOP, tell the user the named
@@ -151,6 +197,10 @@ SELECT flight_id FROM MD_CREATE_FLIGHT(
   schedule_cron := '30 13 * * *');
 ```
 
+(MCP path: `read_text` won't work server-side — drop the two `SET VARIABLE` lines
+and pass `flight.py` / `requirements.txt` contents inline to the `create_flight`
+tool instead. See *How to run the commands*.)
+
 Save the returned `flight_id`. Then verify the upload landed intact:
 
 ```sql
@@ -196,7 +246,11 @@ Expected on a fresh account:
 
 If the run FAILED, read the logs. Known container gotchas: the container
 TZ is `Etc/Unknown` (the shipped flight already pins UTC); secrets inject
-as env vars prefixed with the secret's name (not used by this flight).
+as env vars prefixed with the secret's name (not used by this flight); and
+`MD_LIST_FLIGHT_RUNS` (which the flight calls to read each flight's real run
+history) imports `pytz` internally — it's already in the shipped
+`requirements.txt`, so a `No module named 'pytz'` error means that pin got
+dropped, not that the flight is wrong.
 
 ## Step 4 — Publish the dive
 
@@ -210,9 +264,32 @@ SELECT id FROM MD_CREATE_DIVE(
   content := getvariable('content'));
 ```
 
+(MCP path: pass `dive.tsx` contents inline to the `save_dive` tool instead of the
+`read_text` line.)
+
+**Export form matters.** The dive's entry component must be exported as
+`export default <Name>` — *not* the re-export form `export { <Name> as default }`.
+Both are valid ESM and a local `esbuild` accepts either, so a local check passes
+while the platform push rejects the re-export form with a misleading
+`default_export` error. The shipped `dive.tsx` already uses the correct form;
+keep it that way if you edit the bundle's tail.
+
+**Verify the push landed byte-for-byte** (cheap, and catches a single bad escaped
+character without re-downloading):
+
+```sql
+SELECT md5(content), strlen(content) FROM MD_GET_DIVE(id := '<id>'::UUID);
+```
+
+Compare to the local file's md5 and byte count. (`strlen` gives byte length;
+`octet_length` needs a `BLOB`.)
+
 Then put the returned dive URL into the dive's own manifest (`"url":
 "https://app.motherduck.com/dives/<id>"`) and push once more — the graph
-node for the console should link to the console.
+node for the console should link to the console. Use the **bare-UUID** form of
+the URL: `save_dive`/`update_dive` may return a cosmetic slug prefix that drifts
+between calls (`…/dives/control-tower-<id>` vs `…/dives/dive-<id>`), but both
+resolve by the UUID — link by it and the slug won't matter.
 
 Open the dive with the user. They should see: a mostly-empty graph
 containing just the Control Tower app (catalog → sync flight → warehouse
@@ -230,7 +307,10 @@ This is the part only you can do, and it requires judgment. For each
    - what it **reads** (tables, shares, external sources) and **writes**
    - what it **delivers and for what** (only if it's a delivery mechanism
      for some report — most objects leave `delivers_for` empty)
-   - whether it has a **ledger** (a table where each run/send writes a row)
+   - whether it writes a **data ledger** worth surfacing (a table with one row
+     per delivery/record, for the freshness + delivery panels) — this is *not*
+     where flight run health comes from; that's read automatically from run
+     history (see the schema note below)
 3. Draft the manifest. Schema v1, all of it:
 
 ```json
@@ -242,6 +322,7 @@ This is the part only you can do, and it requires judgment. For each
   "database": "<their_db>",
   "label": "Flight · daily 13:00 UTC",  // optional display hint
   "schedule": "0 13 * * *",             // flights only; must match deployed
+  "stale_hours": 36,                    // optional, flights only; see below
   "url": "https://app.motherduck.com/dives/<id>",   // optional deep link
   "reads_from":  ["table:x", "share:y", "source:z"],
   "writes_to":   ["table:w"],
@@ -254,6 +335,21 @@ This is the part only you can do, and it requires judgment. For each
   }
 }
 ```
+
+   **Run history vs. data ledger — they answer different questions.** A flight's
+   health dot ("did the job run, and did it succeed?") comes from the platform's
+   **run history** (`MD_LIST_FLIGHT_RUNS`), which the sync reads automatically —
+   you don't declare anything for it. The optional `ledger` block points at a
+   **data table** the object writes (one row per delivery/record) and answers a
+   different question — "is the data fresh?" — feeding the run-log and delivery
+   panels. Don't use a per-record audit table as a stand-in for run health: the
+   node would track the last *record* instead of the last *run*, and a quiet
+   period (no new records) would read as a failure.
+
+   `stale_hours` is **opt-in** and flights-only: if set, a flight whose last run
+   is older than that many hours shows an orange "stale" dot (use it for "this
+   nightly job should have run by now"). Omit it and a quiet-but-healthy flight
+   never false-alarms — failures still show red regardless.
 
    Node refs are `type:name`, lowercase, types:
    `flight, dive, table, share, source, delivery`. Honesty rule: declare
@@ -287,9 +383,9 @@ SELECT count(*) FROM ct_objects;                                            -- >
 SELECT * FROM ct_issues;                                                    -- only what the user chose to leave
 ```
 
-Done means: the dive renders every cataloged app, every status dot has a
-real ledger or live count behind it, and the sync runs itself on schedule
-from now on. New objects join the graph by carrying a manifest — that's
+Done means: the dive renders every cataloged app, every status dot has
+something real behind it (flight run history, a data ledger, or a live row/view
+count), and the sync runs itself on schedule from now on. New objects join the graph by carrying a manifest — that's
 the convention the user adopts going forward (put it in their project's
 CLAUDE.md or team docs).
 

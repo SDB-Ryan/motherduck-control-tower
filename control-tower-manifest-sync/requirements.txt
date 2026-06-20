@@ -1,1 +1,4 @@
 duckdb==1.5.3
+# MD_LIST_FLIGHT_RUNS imports pytz internally; it's not a duckdb dependency, so
+# the bare flight container needs it pinned explicitly.
+pytz==2026.2

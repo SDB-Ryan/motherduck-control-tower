@@ -10,3 +10,6 @@ venv/
 
 # OS
 .DS_Store
+
+# Local working notes / session log — never versioned (may name accounts)
+SESSION_LOG.md
