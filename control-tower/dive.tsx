@@ -17,6 +17,8 @@ import { useMemo, useRef } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
 
 const N = (v: unknown): number => (v != null ? Number(v) : 0);
+// Flight run status is stored bare (the flight strips MD's RUN_STATUS_ prefix).
+const runFailed = (s: string | null): boolean => s === "FAILED" || s === "CANCELLED";
 const NUM_FONT = '-apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
 const REQUIRED_DATABASES = ["YOUR_DATABASE"];
@@ -50,6 +52,11 @@ type CtNode = {
   ledger_status_column: string | null;
   ledger_ok_values: string[] | null;
   ledger_detail_columns: string[] | null;
+  // Flight health from platform run history (null for dives — they don't run).
+  last_run_at: string | null;
+  last_run_age_s: number | null;
+  last_run_status: string | null;
+  stale_hours: number | null;
 };
 
 type Edge = { src: string; dst: string };
@@ -265,7 +272,7 @@ function WarehouseCard({
   status,
 }: {
   title: string;
-  tables: { name: string; rows: number | null }[];
+  tables: { name: string; rows: number | null; kind?: string }[];
   status: Status;
 }) {
   return (
@@ -314,10 +321,14 @@ function WarehouseCard({
               fontVariantNumeric: "tabular-nums",
             }}
           >
-            <Dot status={t.rows === null ? "warn" : t.rows > 0 ? "ok" : "warn"} />
+            <Dot status={t.kind === "view" ? "ok" : t.rows === null ? "warn" : t.rows > 0 ? "ok" : "warn"} />
             <span style={{ color: C.text, fontWeight: 600 }}>{t.name}</span>
             <span style={{ color: C.muted }}>
-              {t.rows === null ? "table not found" : `${t.rows.toLocaleString()} rows`}
+              {t.kind === "view"
+                ? "view"
+                : t.rows === null
+                ? "table not found"
+                : `${t.rows.toLocaleString()} rows`}
             </span>
           </div>
         ))}
@@ -339,7 +350,10 @@ export default function ControlTowerV2() {
   const objectsQ = useSQLQuery(`
     SELECT node_id, node_type, name, app, label, url,
            schedule_deployed, source_kind, ledger_table, ledger_ts_column,
-           ledger_status_column, ledger_ok_values, ledger_detail_columns
+           ledger_status_column, ledger_ok_values, ledger_detail_columns,
+           strftime(last_run_ts, '%b %d %H:%M') AS last_run_at,
+           epoch(now() - last_run_ts) AS last_run_age_s,
+           last_run_status, stale_hours
     FROM "${DB}"."main"."ct_objects" ORDER BY node_id
   `);
   const edgesQ = useSQLQuery(`
@@ -349,16 +363,27 @@ export default function ControlTowerV2() {
     SELECT severity, object_key, kind, detail FROM "${DB}"."main"."ct_issues"
     ORDER BY severity, object_key
   `);
+  // Objects intentionally excluded from the graph + issues (see ct_hidden).
+  const hiddenQ = useSQLQuery(`
+    SELECT object_key, reason FROM "${DB}"."main"."ct_hidden"
+    ORDER BY object_key
+  `);
   const syncQ = useSQLQuery(`
     SELECT strftime(max(run_ts), '%b %d %H:%M') AS synced_at,
            any_value(status ORDER BY run_ts DESC) AS status,
            any_value(detail ORDER BY run_ts DESC) AS detail
     FROM "${DB}"."main"."ct_sync_ledger"
   `);
-  // Live table vitals straight from the catalog — no per-table code.
+  // Live table vitals straight from the catalog — no per-table code. Views are
+  // first-class: a manifest can legitimately reference a view via a table: ref,
+  // so we UNION duckdb_views() in (kind='view', no row count) rather than let
+  // it read as a missing table.
   const vitalsQ = useSQLQuery(`
-    SELECT table_name, estimated_size AS n
+    SELECT table_name, estimated_size AS n, 'table' AS kind
     FROM duckdb_tables() WHERE database_name = '${DB}'
+    UNION ALL
+    SELECT view_name AS table_name, NULL AS n, 'view' AS kind
+    FROM duckdb_views() WHERE database_name = '${DB}' AND NOT internal
   `);
 
   // Anchor raw results so downstream useMemos short-circuit.
@@ -380,6 +405,10 @@ export default function ControlTowerV2() {
       ledger_status_column: r.ledger_status_column == null ? null : String(r.ledger_status_column),
       ledger_ok_values: r.ledger_ok_values == null ? null : JSON.parse(String(r.ledger_ok_values)),
       ledger_detail_columns: r.ledger_detail_columns == null ? null : JSON.parse(String(r.ledger_detail_columns)),
+      last_run_at: r.last_run_at == null ? null : String(r.last_run_at),
+      last_run_age_s: r.last_run_age_s == null ? null : N(r.last_run_age_s),
+      last_run_status: r.last_run_status == null ? null : String(r.last_run_status),
+      stale_hours: r.stale_hours == null ? null : N(r.stale_hours),
     }));
     return nodesRef.current;
   }, [objectsQ.data]);
@@ -472,9 +501,12 @@ export default function ControlTowerV2() {
   }, [healthQ.data]);
 
   const vitals = useMemo(() => {
-    const m = new Map<string, number>();
+    const m = new Map<string, { n: number | null; kind: string }>();
     for (const r of Array.isArray(vitalsQ.data) ? (vitalsQ.data as any[]) : []) {
-      m.set(String(r.table_name), N(r.n));
+      m.set(String(r.table_name), {
+        n: r.n == null ? null : N(r.n),
+        kind: String(r.kind || "table"),
+      });
     }
     return m;
   }, [vitalsQ.data]);
@@ -483,17 +515,30 @@ export default function ControlTowerV2() {
   const statusOf = useMemo(() => {
     const m = new Map<string, Status>();
     for (const n of nodes) {
-      if (n.ledger_table) {
+      if (n.node_type === "flight") {
+        // Job health from platform RUN HISTORY, not a data ledger. Staleness is
+        // opt-in: with no stale_hours a quiet flight never false-alarms.
+        const stale = n.stale_hours != null && n.last_run_age_s != null &&
+          n.last_run_age_s > n.stale_hours * 3600;
+        if (!n.last_run_at) m.set(n.node_id, "idle");          // never run
+        else if (runFailed(n.last_run_status)) m.set(n.node_id, "fail");
+        else if (stale) m.set(n.node_id, "warn");
+        else m.set(n.node_id, "ok");
+      } else if (n.ledger_table) {
+        // Non-flight with a data ledger: freshness comes from the ledger.
         const h = health.get(n.node_id);
         if (!h || !h.last_at) m.set(n.node_id, "idle");
         else if (!h.is_ok) m.set(n.node_id, "fail");
-        else if (n.schedule_deployed && h.age_s > 36 * 3600) m.set(n.node_id, "warn");
         else m.set(n.node_id, "ok");
       } else if (n.node_type === "dive") {
         m.set(n.node_id, n.source_kind === "code" ? "ok" : "idle");
       } else if (n.node_type === "table") {
-        const rows = vitals.get(n.name);
-        m.set(n.node_id, rows == null ? "warn" : rows > 0 ? "ok" : "warn");
+        // In neither catalog → missing (warn); a view is healthy as-is; a
+        // table is healthy iff it has rows.
+        const v = vitals.get(n.name);
+        if (!v) m.set(n.node_id, "warn");
+        else if (v.kind === "view") m.set(n.node_id, "ok");
+        else m.set(n.node_id, (v.n || 0) > 0 ? "ok" : "warn");
       }
     }
     // Derived endpoints inherit from the manifest-carrying node beside them:
@@ -570,6 +615,7 @@ export default function ControlTowerV2() {
   }, [nodes, allEdges, byId, activeApp, view]);
 
   const issues = Array.isArray(issuesQ.data) ? (issuesQ.data as any[]) : [];
+  const hidden = Array.isArray(hiddenQ.data) ? (hiddenQ.data as any[]) : [];
   const syncRow = Array.isArray(syncQ.data) ? (syncQ.data as any[])[0] : undefined;
 
   const appStatus = (app: string): Status => {
@@ -582,16 +628,18 @@ export default function ControlTowerV2() {
   // ── node renderer (kind/title/stat all manifest- or catalog-driven) ──
   function renderNode(id: string) {
     if (graph && id === graph.whId) {
-      const tables = graph.memberTables.map((name) => ({
-        name, rows: vitals.has(name) ? vitals.get(name)! : null,
-      }));
-      const st: Status = tables.every((t) => (t.rows || 0) > 0) ? "ok" : "warn";
+      const tables = graph.memberTables.map((name) => {
+        const v = vitals.get(name);
+        return { name, rows: v ? v.n : null, kind: v ? v.kind : undefined };
+      });
+      // A view is healthy without a row count; a table needs rows.
+      const st: Status =
+        tables.every((t) => t.kind === "view" || (t.rows || 0) > 0) ? "ok" : "warn";
       return <WarehouseCard title={DB} tables={tables} status={st} />;
     }
     const n = byId.get(id);
     const st = statusOf.get(id) || "idle";
     if (!n) return <NodeCard kind="?" title={id} status="idle" statusLabel="unknown" />;
-    const h = health.get(id);
     if (n.node_type === "dive") {
       return (
         <NodeCard kind={n.label || "Dive"} title={prettyName(n.name)}
@@ -600,12 +648,15 @@ export default function ControlTowerV2() {
       );
     }
     if (n.node_type === "flight") {
+      // Stat + label come from platform run history (see statusOf).
+      const ran = !!n.last_run_at;
+      const runStatus = (n.last_run_status || "").toLowerCase();
       return (
         <NodeCard kind={n.label || "Flight"} title={n.name}
           href={n.url || undefined}
-          stat={h && h.last_at ? `${h.last_at} · ${h.last_status}` : undefined}
+          stat={ran ? `${n.last_run_at} · ${runStatus}` : undefined}
           status={st}
-          statusLabel={!h || !h.last_at ? "never run" : st === "warn" ? "stale" : h.last_status} />
+          statusLabel={!ran ? "never run" : st === "warn" ? "stale" : runStatus} />
       );
     }
     if (n.node_type === "share") {
@@ -715,7 +766,7 @@ export default function ControlTowerV2() {
         const dives = code.filter((n) => n.node_type === "dive").length;
         const tbls = nodes.filter((n) => n.app === app && n.node_type === "table").length;
         const newest = code
-          .map((n) => health.get(n.node_id)?.last_at || "")
+          .map((n) => (n.node_type === "flight" ? n.last_run_at : health.get(n.node_id)?.last_at) || "")
           .filter(Boolean).sort().slice(-1)[0];
         return (
           <button
@@ -959,6 +1010,33 @@ export default function ControlTowerV2() {
           </div>
         ) : null}
       </div>
+
+      {/* Hidden objects — intentionally excluded from the graph + issues */}
+      {hidden.length ? (
+        <div style={{ marginTop: 20 }}>
+          <div
+            style={{
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: C.muted,
+              fontFamily: NUM_FONT,
+              marginBottom: 6,
+            }}
+          >
+            Hidden ({hidden.length})
+          </div>
+          {hidden.map((h, k) => (
+            <div
+              key={k}
+              style={{ fontSize: 12, fontFamily: NUM_FONT, color: C.muted, padding: "2px 0" }}
+            >
+              <strong style={{ color: C.text }}>{String(h.object_key)}</strong>
+              {h.reason ? ` — ${String(h.reason)}` : ""}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {/* Sync footer */}
       <p style={{ fontSize: 11, color: C.muted, fontFamily: NUM_FONT, marginTop: 16 }}>

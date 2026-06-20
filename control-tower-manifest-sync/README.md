@@ -12,7 +12,7 @@ materializes the data-flow graph as tables.
 
 | Table | Grain | Contents |
 |---|---|---|
-| `ct_objects` | one row per graph node | code objects (dives/flights with manifests) + derived nodes (tables, shares, sources, deliveries, the warehouse) with label, url, app, ledger pointers, declared + deployed schedules |
+| `ct_objects` | one row per graph node | code objects (dives/flights with manifests) + derived nodes (tables, shares, sources, deliveries, the warehouse) with label, url, app, ledger pointers, declared + deployed schedules, and per-flight run history (`last_run_ts`, `last_run_status`, opt-in `stale_hours`) |
 | `ct_edges` | one row per edge per view | `kind` = `physical` or `logical`; the dive's view toggle is just a filter on this column |
 | `ct_issues` | one row per problem | missing manifests (warning), invalid manifests (error), schedule drift between manifest and deployed cron (warning) |
 | `ct_sync_ledger` | one row per run | the flight's own health, failures included |
@@ -30,6 +30,12 @@ verified by reading the counts back.
 - Derived from the catalog, never declared: the `warehouse:<db>` node and the
   `warehouse → share` edge (via `MD_LIST_DATABASE_SHARES()`); deployed crons (via
   `MD_LIST_FLIGHTS()`) for drift detection.
+- Flight health is read from **run history** (`MD_LIST_FLIGHT_RUNS`), not a data
+  ledger: each flight's latest run timestamp + status land in `ct_objects`
+  (`last_run_ts` / `last_run_status`, the `RUN_STATUS_` prefix stripped). A data
+  ledger answers "is the data fresh"; run history answers "did the job run". A
+  manifest's optional `stale_hours` (flights only) sets the staleness threshold;
+  omit it and a quiet-but-healthy flight never shows stale.
 
 ## Notes
 

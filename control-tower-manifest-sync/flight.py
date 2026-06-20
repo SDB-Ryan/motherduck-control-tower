@@ -26,6 +26,7 @@ manifest_check.py — "the lint passes" means "this flight sees it."
 #   "label": "Flight · daily 13:30 UTC",
 #   "schedule": "30 13 * * *",
 #   "url": "https://app.motherduck.com/flights",
+#   "stale_hours": 36,
 #   "reads_from": ["source:motherduck-catalog"],
 #   "writes_to": ["table:ct_objects", "table:ct_edges", "table:ct_issues"],
 #   "delivers_for": [],
@@ -51,6 +52,9 @@ COMMENT_PREFIX_RE = re.compile(r"^\s*(#|//|\*)\s?")
 VALID_TYPES = {"dive", "flight"}
 VALID_REF_RE = re.compile(
     r"^(flight|dive|table|share|source|delivery):[a-z0-9_./-]+$")
+# MD_LIST_FLIGHT_RUNS reports status as 'RUN_STATUS_SUCCEEDED' etc. — strip the
+# prefix at capture so the stored value is bare ('SUCCEEDED', 'FAILED', ...).
+RUN_STATUS_PREFIX_RE = re.compile(r"^RUN_STATUS_")
 EDGE_FIELDS = ("reads_from", "writes_to", "delivers_for", "feeds")
 REQUIRED_FIELDS = ("manifest_version", "object", "type", "app", "database")
 LEDGER_FIELDS = ("table", "ts_column", "status_column", "ok_values")
@@ -110,6 +114,11 @@ def validate(manifest):
                     isinstance(ledger["detail_columns"], list)
                     and all(isinstance(c, str) for c in ledger["detail_columns"])):
                 problems.append("'ledger.detail_columns' must be a list of column names")
+    if "stale_hours" in manifest:
+        sh = manifest["stale_hours"]
+        # bool is a subclass of int — reject it explicitly.
+        if isinstance(sh, bool) or not isinstance(sh, int) or sh <= 0:
+            problems.append("'stale_hours' must be a positive integer (hours)")
     return problems
 
 
@@ -126,43 +135,75 @@ def pick_function(con, candidates):
     raise RuntimeError(f"none of {candidates} exist in this session")
 
 
+def latest_run(con, runs_fn, flight_id):
+    """The newest run's (timestamp, bare status) for a flight, or (None, None).
+
+    Flight health comes from the platform's RUN HISTORY, not a data ledger: a
+    data ledger answers "is the data fresh?", run history answers "did the job
+    actually run?". A per-record audit table (one row per item ingested) would
+    make a node track the last item instead of the last run, and a quiet period
+    would read as a failure — so the run/status/timestamp dot is driven from
+    MD_LIST_FLIGHT_RUNS here. Runs are ordered by run_number (sequential) so we
+    don't depend on the function's internal ordering; ended_at is the true
+    completion, falling back to started_at/created_at for in-flight runs."""
+    row = con.execute(
+        f'SELECT status, coalesce(ended_at, started_at, created_at) AS ts '
+        f'FROM {runs_fn}(flight_id := ?::UUID) '
+        f'ORDER BY run_number DESC LIMIT 1', [str(flight_id)]).fetchone()
+    if not row or row[1] is None:
+        return None, None
+    return row[1], RUN_STATUS_PREFIX_RE.sub("", row[0] or "")
+
+
 def enumerate_objects(con):
-    """Return (kind, identity, source, deployed_schedule) for every deployed
-    dive and flight in the account. identity is the human name to report
-    issues against; deployed_schedule is None for dives."""
+    """Return (kind, identity, source, deployed_schedule, last_run_ts,
+    last_run_status) for every deployed dive and flight in the account.
+    identity is the human name to report issues against; deployed_schedule,
+    last_run_ts and last_run_status are None for dives (dives don't run)."""
     out = []
 
     flights_fn = pick_function(con, ["MD_LIST_FLIGHTS", "MD_FLIGHTS"])
     versions_fn = pick_function(
         con, ["MD_LIST_FLIGHT_VERSIONS", "MD_FLIGHT_VERSIONS"])
+    runs_fn = pick_function(con, ["MD_LIST_FLIGHT_RUNS", "MD_FLIGHT_RUNS"])
     for fid, fname, cron in con.execute(
             f"SELECT flight_id, flight_name, schedule_cron FROM {flights_fn}()"
     ).fetchall():
         row = con.execute(
             f'SELECT source_code FROM {versions_fn}('
             '"limit" := 1, flight_id := ?::UUID)', [str(fid)]).fetchone()
-        out.append(("flight", fname, (row[0] or "") if row else "", cron))
+        last_run_ts, last_run_status = latest_run(con, runs_fn, fid)
+        out.append(("flight", fname, (row[0] or "") if row else "", cron,
+                    last_run_ts, last_run_status))
 
     for did, title in con.execute(
             'SELECT id, title FROM MD_LIST_DIVES('
             'include_org_shares=false, "offset"=0, "limit"=500)').fetchall():
         row = con.execute(
             "SELECT content FROM MD_GET_DIVE(id=?::UUID)", [str(did)]).fetchone()
-        out.append(("dive", title, (row[0] or "") if row else "", None))
+        out.append(("dive", title, (row[0] or "") if row else "", None,
+                    None, None))
 
     return out
 
 
 # ── graph build (the resolution rules) ───────────────────────────────────
 
-def build_graph(objects, shares):
-    """objects: list of (kind, identity, source, deployed_schedule).
+def build_graph(objects, shares, hidden_keys=frozenset()):
+    """objects: list of (kind, identity, source, deployed_schedule,
+    last_run_ts, last_run_status).
     shares: list of (share_name, source_db_name) from the catalog.
+    hidden_keys: object keys ('kind:identity') to exclude entirely — no node
+    and no issue (e.g. account marker dives). See ct_hidden / sync-hidden.py.
     Returns (nodes, edges, issues)."""
     issues = []
-    parsed = []  # (manifest, deployed_schedule)
+    parsed = []  # (manifest, deployed_schedule, last_run_ts, last_run_status)
 
-    for kind, identity, source, deployed_schedule in objects:
+    for kind, identity, source, deployed_schedule, last_run_ts, \
+            last_run_status in objects:
+        # Intentionally hidden objects produce no node and no issue.
+        if f"{kind}:{identity}" in hidden_keys:
+            continue
         manifest, parse_err = parse_manifest(source)
         if parse_err:
             issues.append(dict(severity="error", object_key=f"{kind}:{identity}",
@@ -187,12 +228,13 @@ def build_graph(objects, shares):
                 detail=f"manifest says type '{manifest['type']}' but the "
                        f"deployed object is a {kind}"))
             continue
-        parsed.append((manifest, deployed_schedule))
+        parsed.append((manifest, deployed_schedule, last_run_ts,
+                       last_run_status))
 
     # Every manifest-declared ledger table is ops plumbing: hidden from the
     # diagram in both views, never materialized as a node.
     hidden = {f"table:{m['ledger']['table']}"
-              for m, _ in parsed if m.get("ledger")}
+              for m, *_ in parsed if m.get("ledger")}
 
     nodes = {}     # node_id -> dict
     edges = set()  # (src, dst, kind)
@@ -208,9 +250,10 @@ def build_graph(objects, shares):
             source_kind="derived", has_manifest=False,
             ledger_table=None, ledger_ts_column=None,
             ledger_status_column=None, ledger_ok_values=None,
-            ledger_detail_columns=None)
+            ledger_detail_columns=None,
+            last_run_ts=None, last_run_status=None, stale_hours=None)
 
-    for m, deployed_schedule in parsed:
+    for m, deployed_schedule, last_run_ts, last_run_status in parsed:
         node_id = f"{m['type']}:{m['object']}"
         ledger = m.get("ledger") or {}
         nodes[node_id] = dict(
@@ -226,7 +269,11 @@ def build_graph(objects, shares):
             ledger_status_column=ledger.get("status_column"),
             ledger_ok_values=json.dumps(ledger["ok_values"]) if ledger else None,
             ledger_detail_columns=(json.dumps(ledger["detail_columns"])
-                                   if ledger.get("detail_columns") else None))
+                                   if ledger.get("detail_columns") else None),
+            # Flight health from run history (None for dives, which don't run);
+            # stale_hours is opt-in per object (None ⇒ no staleness alarm).
+            last_run_ts=last_run_ts, last_run_status=last_run_status,
+            stale_hours=m.get("stale_hours"))
         if (m.get("schedule") and deployed_schedule
                 and m["schedule"] != deployed_schedule):
             issues.append(dict(
@@ -234,7 +281,7 @@ def build_graph(objects, shares):
                 detail=f"manifest declares cron '{m['schedule']}' but the "
                        f"deployed schedule is '{deployed_schedule}'"))
 
-    for m, _ in parsed:
+    for m, *_ in parsed:
         node_id = f"{m['type']}:{m['object']}"
         reads = [r for r in m.get("reads_from", []) if r not in hidden]
         writes = [r for r in m.get("writes_to", []) if r not in hidden]
@@ -271,7 +318,8 @@ def build_graph(objects, shares):
                 source_kind="derived", has_manifest=False,
                 ledger_table=None, ledger_ts_column=None,
                 ledger_status_column=None, ledger_ok_values=None,
-                ledger_detail_columns=None)
+                ledger_detail_columns=None,
+                last_run_ts=None, last_run_status=None, stale_hours=None)
         declare_node(f"share:{share_name}", None)
         edges.add((wh, f"share:{share_name}", "physical"))
         edges.add((wh, f"share:{share_name}", "logical"))
@@ -292,6 +340,8 @@ def write_graph(con, nodes, edges, issues, synced_at):
           ledger_table VARCHAR, ledger_ts_column VARCHAR,
           ledger_status_column VARCHAR, ledger_ok_values VARCHAR,
           ledger_detail_columns VARCHAR,
+          last_run_ts TIMESTAMPTZ, last_run_status VARCHAR,
+          stale_hours INTEGER,
           synced_at TIMESTAMPTZ)""")
     con.execute("""
         CREATE OR REPLACE TABLE ct_edges (
@@ -305,12 +355,14 @@ def write_graph(con, nodes, edges, issues, synced_at):
     # yet) — executemany rejects empty parameter lists, so guard each one.
     if nodes:
         con.executemany(
-            "INSERT INTO ct_objects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO ct_objects VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [[n["node_id"], n["node_type"], n["name"], n["app"], n["database"],
               n["label"], n["url"], n["schedule_declared"], n["schedule_deployed"],
               n["source_kind"], n["has_manifest"], n["ledger_table"],
               n["ledger_ts_column"], n["ledger_status_column"],
-              n["ledger_ok_values"], n["ledger_detail_columns"], synced_at]
+              n["ledger_ok_values"], n["ledger_detail_columns"],
+              n["last_run_ts"], n["last_run_status"], n["stale_hours"], synced_at]
              for n in nodes])
     if edges:
         con.executemany(
@@ -343,6 +395,15 @@ def ensure_ledger(con):
         " run_ts TIMESTAMPTZ, status VARCHAR, detail VARCHAR, error VARCHAR)")
 
 
+def ensure_hidden(con):
+    # Objects intentionally excluded from the graph + issues (e.g. account
+    # marker dives). Populated out-of-band (sync-hidden.py); persists across
+    # runs — the flight only CREATE-OR-REPLACEs ct_objects/edges/issues.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS ct_hidden ("
+        " object_key VARCHAR, reason VARCHAR, hidden_at TIMESTAMPTZ)")
+
+
 def write_ledger(con, status, detail="", error=""):
     con.execute(f"INSERT INTO {LEDGER} VALUES (?, ?, ?, ?)",
                 [datetime.now(timezone.utc), status, detail, error])
@@ -354,18 +415,25 @@ def main():
     # TIMESTAMPTZ fetches — pin the session before touching timestamps.
     con.execute("SET TimeZone='UTC'")
     ensure_ledger(con)
+    ensure_hidden(con)
     try:
         objects = enumerate_objects(con)
         print(f"enumerated {len(objects)} deployed objects:")
-        for kind, identity, source, sched in objects:
+        for kind, identity, source, sched, last_ts, last_status in objects:
             print(f"  {kind:7s} {identity}  ({len(source)} chars"
-                  + (f", cron {sched}" if sched else "") + ")")
+                  + (f", cron {sched}" if sched else "")
+                  + (f", last run {last_status}" if last_status else "") + ")")
 
         shares = con.execute(
             "SELECT name, source_db_name FROM MD_LIST_DATABASE_SHARES()"
         ).fetchall()
 
-        nodes, edges, issues = build_graph(objects, shares)
+        hidden_keys = {r[0] for r in con.execute(
+            "SELECT object_key FROM ct_hidden").fetchall()}
+        if hidden_keys:
+            print(f"hiding {len(hidden_keys)} object(s): "
+                  + ", ".join(sorted(hidden_keys)))
+        nodes, edges, issues = build_graph(objects, shares, hidden_keys)
         synced_at = datetime.now(timezone.utc)
         write_graph(con, nodes, edges, issues, synced_at)
 

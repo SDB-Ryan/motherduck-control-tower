@@ -12,11 +12,15 @@ it joins the graph on the next sync; remove it and it drops off.
 ## Data sources
 
 - `ct_objects`, `ct_edges`, `ct_issues`, `ct_sync_ledger` — the graph and its
-  problems, from the manifest-sync flight.
-- Every ledger table declared in a manifest's `ledger` block — health is ONE
-  generic UNION query built client-side from those declarations.
-- `duckdb_tables()` — live row counts for the warehouse box (no per-table code;
-  a declared-but-missing table shows as "table not found").
+  problems, from the manifest-sync flight. Flight health (dot + "last run") comes
+  from the `last_run_ts` / `last_run_status` / `stale_hours` columns the sync
+  fills from run history — not from a data ledger.
+- Every ledger table declared in a manifest's `ledger` block — feeds the run-log
+  and delivery panels (data freshness), via ONE generic UNION query built
+  client-side from those declarations.
+- `duckdb_tables()` + `duckdb_views()` — live row counts for the warehouse box
+  (no per-table code). Views are first-class ("view"); a ref missing from both
+  catalogs shows as "table not found".
 
 ## How rendering works
 
@@ -38,5 +42,6 @@ it joins the graph on the next sync; remove it and it drops off.
 - Delivery panel: a delivery-feeding flight that declares `ledger.detail_columns`
   gets a "recent deliveries" panel rendering exactly those columns. No
   declaration, no panel.
-- Sync-freshness footer; a "stale" warn state when a scheduled flight's latest
-  successful run is older than ~36h.
+- Sync-freshness footer; a flight goes orange "stale" only when its manifest
+  opts in via `stale_hours` and its last run is older than that — a quiet flight
+  with no threshold set never false-alarms (failures still show red).
