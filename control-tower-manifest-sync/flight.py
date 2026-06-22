@@ -189,6 +189,121 @@ def enumerate_objects(con):
 
 # ── graph build (the resolution rules) ───────────────────────────────────
 
+def find_cycles(edges):
+    """Detect cyclic topology per view ('physical' / 'logical').
+
+    The lineage diagram is laid out as a DAG: roots are the indegree-0 nodes,
+    columns are longest-path depth. A dependency loop has no root, so the board
+    renders blank — and a normal root feeding into a loop blows up the column
+    relaxation instead. A control tower must NAME that mistake, never silently
+    vanish. Returns a list of (kind, [member_node_ids]); one entry per distinct
+    cycle (self-loops included)."""
+    by_kind = {}
+    for src, dst, kind in edges:
+        by_kind.setdefault(kind, []).append((src, dst))
+    found = []
+    for kind, elist in by_kind.items():
+        adj, nodes = {}, set()
+        for src, dst in elist:
+            nodes.add(src)
+            nodes.add(dst)
+            adj.setdefault(src, []).append(dst)
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {n: WHITE for n in nodes}
+        reported = set()
+        # Iterative DFS that keeps the active path so a back-edge to a GRAY
+        # node yields the actual cycle members (not just a yes/no).
+        for start in nodes:
+            if color[start] != WHITE:
+                continue
+            stack = [(start, iter(adj.get(start, ())))]
+            path = [start]
+            color[start] = GRAY
+            while stack:
+                node, it = stack[-1]
+                advanced = False
+                for nxt in it:
+                    if color.get(nxt) == GRAY:
+                        members = path[path.index(nxt):]
+                        key = frozenset(members)
+                        if key not in reported:
+                            reported.add(key)
+                            found.append((kind, list(members)))
+                        advanced = True
+                        break
+                    if color.get(nxt) == WHITE:
+                        color[nxt] = GRAY
+                        path.append(nxt)
+                        stack.append((nxt, iter(adj.get(nxt, ()))))
+                        advanced = True
+                        break
+                if not advanced:
+                    color[node] = BLACK
+                    stack.pop()
+                    path.pop()
+    return found
+
+
+def _is_temporal(data_type):
+    dt = (data_type or "").upper()
+    return any(t in dt for t in ("TIMESTAMP", "DATE", "TIME"))
+
+
+def check_ledger_targets(con, nodes):
+    """Confirm every code object's declared ledger table/columns exist and are
+    typed correctly, against the live catalog. Sets each node's 'ledger_valid'
+    (True/False; left None when no ledger is declared) and returns issue dicts
+    for the invalid ones.
+
+    Why: the dive turns each ledger declaration into executable SQL — a single
+    UNION ALL across all of them. qid/qlit stop injection but cannot prove the
+    target exists, and one missing/renamed table or column fails the WHOLE
+    union, so every ledger-backed object silently reads 'idle'. Validating here
+    lets the dive drop the known-bad object and show its owner an explicit
+    config error instead of a misleading green/idle board."""
+    issues = []
+    rows = con.execute(
+        "SELECT lower(table_name), lower(column_name), data_type "
+        "FROM information_schema.columns "
+        "WHERE lower(table_catalog) = lower(?)", [DATABASE]).fetchall()
+    catalog = {}
+    for tname, cname, dtype in rows:
+        catalog.setdefault(tname, {})[cname] = dtype
+    for n in nodes:
+        if not n.get("ledger_table"):
+            continue
+        tbl = n["ledger_table"]
+        cols = catalog.get(tbl.lower())
+        problems = []
+        if cols is None:
+            problems.append(
+                f"ledger table '{tbl}' was not found in {DATABASE} — health "
+                f"cannot be evaluated")
+        else:
+            ts = n.get("ledger_ts_column")
+            stc = n.get("ledger_status_column")
+            if ts and ts.lower() not in cols:
+                problems.append(f"ts_column '{ts}' not found in '{tbl}'")
+            elif ts and not _is_temporal(cols[ts.lower()]):
+                problems.append(
+                    f"ts_column '{ts}' is {cols[ts.lower()]}, not a "
+                    f"timestamp/date type")
+            if stc and stc.lower() not in cols:
+                problems.append(f"status_column '{stc}' not found in '{tbl}'")
+            detail_cols = (json.loads(n["ledger_detail_columns"])
+                           if n.get("ledger_detail_columns") else [])
+            for dc in detail_cols:
+                if isinstance(dc, str) and dc.lower() not in cols:
+                    problems.append(
+                        f"detail column '{dc}' not found in '{tbl}'")
+        n["ledger_valid"] = not problems
+        if problems:
+            issues.append(dict(
+                severity="error", object_key=n["node_id"],
+                kind="invalid-ledger", detail="; ".join(problems)))
+    return issues
+
+
 def build_graph(objects, shares, hidden_keys=frozenset()):
     """objects: list of (kind, identity, source, deployed_schedule,
     last_run_ts, last_run_status).
@@ -198,6 +313,7 @@ def build_graph(objects, shares, hidden_keys=frozenset()):
     Returns (nodes, edges, issues)."""
     issues = []
     parsed = []  # (manifest, deployed_schedule, last_run_ts, last_run_status)
+    out_of_scope = []  # (object_key, declared_database) targeting another warehouse
 
     for kind, identity, source, deployed_schedule, last_run_ts, \
             last_run_status in objects:
@@ -228,8 +344,26 @@ def build_graph(objects, shares, hidden_keys=frozenset()):
                 detail=f"manifest says type '{manifest['type']}' but the "
                        f"deployed object is a {kind}"))
             continue
+        # Single-warehouse scope. The catalog listing is account-wide, but
+        # Control Tower charts ONE warehouse (DATABASE). An object declaring a
+        # different database is discovered but NOT charted — otherwise its
+        # tables would collapse into this warehouse's box and misrepresent the
+        # environment. Recorded as out-of-scope so the omission is visible, not
+        # silent. (Multi-warehouse is a planned future mode.)
+        if manifest.get("database") != DATABASE:
+            out_of_scope.append((f"{kind}:{identity}", manifest.get("database")))
+            continue
         parsed.append((manifest, deployed_schedule, last_run_ts,
                        last_run_status))
+
+    if out_of_scope:
+        others = sorted({db for _, db in out_of_scope if db})
+        issues.append(dict(
+            severity="warning", object_key="(environment)", kind="out-of-scope",
+            detail=(f"{len(out_of_scope)} object(s) target other databases "
+                    f"({', '.join(others)}) and are not charted — Control Tower "
+                    f"monitors a single warehouse ('{DATABASE}'). Multi-warehouse "
+                    f"support is planned.")))
 
     # Every manifest-declared ledger table is ops plumbing: hidden from the
     # diagram in both views, never materialized as a node.
@@ -250,7 +384,7 @@ def build_graph(objects, shares, hidden_keys=frozenset()):
             source_kind="derived", has_manifest=False,
             ledger_table=None, ledger_ts_column=None,
             ledger_status_column=None, ledger_ok_values=None,
-            ledger_detail_columns=None,
+            ledger_detail_columns=None, ledger_valid=None,
             last_run_ts=None, last_run_status=None, stale_hours=None)
 
     for m, deployed_schedule, last_run_ts, last_run_status in parsed:
@@ -270,6 +404,9 @@ def build_graph(objects, shares, hidden_keys=frozenset()):
             ledger_ok_values=json.dumps(ledger["ok_values"]) if ledger else None,
             ledger_detail_columns=(json.dumps(ledger["detail_columns"])
                                    if ledger.get("detail_columns") else None),
+            # Validated against the live catalog later (check_ledger_targets);
+            # None here means "not yet checked / no ledger declared".
+            ledger_valid=None,
             # Flight health from run history (None for dives, which don't run);
             # stale_hours is opt-in per object (None ⇒ no staleness alarm).
             last_run_ts=last_run_ts, last_run_status=last_run_status,
@@ -318,11 +455,21 @@ def build_graph(objects, shares, hidden_keys=frozenset()):
                 source_kind="derived", has_manifest=False,
                 ledger_table=None, ledger_ts_column=None,
                 ledger_status_column=None, ledger_ok_values=None,
-                ledger_detail_columns=None,
+                ledger_detail_columns=None, ledger_valid=None,
                 last_run_ts=None, last_run_status=None, stale_hours=None)
         declare_node(f"share:{share_name}", None)
         edges.add((wh, f"share:{share_name}", "physical"))
         edges.add((wh, f"share:{share_name}", "logical"))
+
+    # Topology must be acyclic per view — report loops as errors so the dive
+    # can draw a named error panel instead of a blank or runaway board.
+    for kind, members in find_cycles(edges):
+        issues.append(dict(
+            severity="error", object_key=members[0], kind="cycle",
+            detail=(f"dependency cycle in the {kind} view: "
+                    + " → ".join(members + [members[0]])
+                    + " — the lineage graph cannot be drawn until this loop "
+                      "is removed")))
 
     return list(nodes.values()), sorted(edges), issues
 
@@ -339,7 +486,7 @@ def write_graph(con, nodes, edges, issues, synced_at):
           source_kind VARCHAR, has_manifest BOOLEAN,
           ledger_table VARCHAR, ledger_ts_column VARCHAR,
           ledger_status_column VARCHAR, ledger_ok_values VARCHAR,
-          ledger_detail_columns VARCHAR,
+          ledger_detail_columns VARCHAR, ledger_valid BOOLEAN,
           last_run_ts TIMESTAMPTZ, last_run_status VARCHAR,
           stale_hours INTEGER,
           synced_at TIMESTAMPTZ)""")
@@ -356,12 +503,12 @@ def write_graph(con, nodes, edges, issues, synced_at):
     if nodes:
         con.executemany(
             "INSERT INTO ct_objects VALUES "
-            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [[n["node_id"], n["node_type"], n["name"], n["app"], n["database"],
               n["label"], n["url"], n["schedule_declared"], n["schedule_deployed"],
               n["source_kind"], n["has_manifest"], n["ledger_table"],
               n["ledger_ts_column"], n["ledger_status_column"],
-              n["ledger_ok_values"], n["ledger_detail_columns"],
+              n["ledger_ok_values"], n["ledger_detail_columns"], n["ledger_valid"],
               n["last_run_ts"], n["last_run_status"], n["stale_hours"], synced_at]
              for n in nodes])
     if edges:
@@ -434,6 +581,9 @@ def main():
             print(f"hiding {len(hidden_keys)} object(s): "
                   + ", ".join(sorted(hidden_keys)))
         nodes, edges, issues = build_graph(objects, shares, hidden_keys)
+        # Validate every declared ledger against the live catalog (sets
+        # ledger_valid on each node; adds an issue per invalid contract).
+        issues += check_ledger_targets(con, nodes)
         synced_at = datetime.now(timezone.utc)
         write_graph(con, nodes, edges, issues, synced_at)
 

@@ -1,8 +1,8 @@
 # Control Tower
 
-A self-updating ops console for everything running in your MotherDuck account — the
-data-flow graph of your dives, flights, tables, and shares, drawn automatically
-from metadata you write into the objects themselves.
+A self-updating ops console for a **MotherDuck warehouse** — the data-flow graph
+of the dives, flights, tables, and shares feeding one database, drawn
+automatically from metadata you write into the objects themselves.
 
 ![Control Tower mapping a MotherDuck account's data flow](docs/control-tower.png)
 
@@ -14,6 +14,17 @@ logical/physical toggle, live row counts and run health, and a warnings strip fo
 anything not yet cataloged. Zero hardcoded nodes: add a manifest and an object
 joins the graph on the next sync; an object with no manifest shows up on the
 issues list instead.
+
+## Scope: one warehouse (for now)
+
+Control Tower charts a **single warehouse** — the one database you point it at.
+It discovers every dive and flight in your account, but only charts the objects
+that belong to that warehouse; anything targeting another database is listed as
+**out-of-scope** rather than forced onto the graph. Its own `ct_*` bookkeeping
+tables also live in that database (it never modifies your data tables). A
+multi-warehouse console — one view across several databases, with the `ct_*`
+tables moved into their own dedicated database — is a planned future mode. For
+now, install one Control Tower per warehouse you want to watch.
 
 ## How it fits together
 
@@ -36,9 +47,9 @@ INSTALL.md                      step-by-step install guide (hand it to an agent)
 
 ## Install
 
-Control Tower installs into **one MotherDuck database** and catalogs the objects
-in that account. The whole thing is one flight, one dive, and four `ct_*` tables;
-it never touches your data tables.
+Control Tower installs into **one MotherDuck database** and charts the objects
+feeding that warehouse. The whole thing is one flight, one dive, and a handful of
+`ct_*` bookkeeping tables; it never touches your data tables.
 
 **Load [`INSTALL.md`](INSTALL.md) into the AI assistant of your choice** (Claude,
 ChatGPT, Claude Code — anything that can run MotherDuck SQL) and tell it to

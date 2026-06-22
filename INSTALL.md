@@ -11,8 +11,8 @@ write to their account.
 
 ## What you are installing
 
-Control Tower is a self-updating ops console for everything running in your
-MotherDuck account. Three pieces:
+Control Tower is a self-updating ops console for a single MotherDuck
+warehouse. Three pieces:
 
 | Piece | What it is | What it touches |
 |---|---|---|
@@ -153,10 +153,14 @@ allows *creating* one — the only reliable test is trying, in Step 2.
 
 ### Then pick the database (and schedule)
 
-- **Database:** pick ONE database to **store** Control Tower's `ct_*` graph
-  tables — that's all this choice controls. Discovery is account-wide: Control
-  Tower maps every dive and flight in the account, whatever database each one
-  uses. List them (`SHOW DATABASES`) and confirm which holds the tables.
+- **Database:** pick the ONE warehouse Control Tower will monitor — this choice
+  is both where its `ct_*` tables are stored AND the warehouse it charts.
+  Discovery is account-wide (it lists every dive and flight in the account), but
+  only objects whose manifest targets **this** database are charted; objects in
+  other databases are reported as **out-of-scope** rather than forced onto the
+  graph. Control Tower is single-warehouse today — install one per warehouse you
+  want to watch (multi-warehouse is a planned mode). List them with
+  `SHOW DATABASES`.
 - **Schedule:** default `30 13 * * *` (UTC — tell the user the local time; cron is
   UTC year-round). Skip if installing local-sync.
 
