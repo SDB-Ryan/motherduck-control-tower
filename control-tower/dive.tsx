@@ -1,17 +1,5 @@
-/* @manifest:begin
-{
-  "manifest_version": 1,
-  "object": "control-tower",
-  "type": "dive",
-  "app": "control-tower",
-  "database": "YOUR_DATABASE",
-  "label": "Dive · ops console",
-  "url": "",
-  "reads_from": ["table:ct_objects", "table:ct_edges", "table:ct_issues"],
-  "delivers_for": [],
-  "feeds": []
-}
-@manifest:end */
+/* Lineage for this dive is cataloged in ct_registry (authored via the
+   build-manifest skill), NOT in an in-source @manifest block. */
 
 import { useMemo, useRef, useState, useEffect, createContext, useContext } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
@@ -23,7 +11,8 @@ const SANS = '-apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 const MONO = "ui-monospace, Menlo, Consolas, monospace";
 const SERIF = "Georgia, 'Times New Roman', serif";
 
-const DB = "YOUR_DATABASE";
+const DB = "control_tower";                    // canonical Control Tower DB the dive reads (all ct_* tables)
+const WAREHOUSE = "YOUR_DATABASE";  // fallback only: a table with no database collapses here. Normally each table collapses into warehouse:<its own database>, so a board can show N warehouses.
 
 // Two palettes; the active one (C) is swapped per theme at render time. Every
 // style reads C, so switching themes is a single reassignment.
@@ -120,7 +109,7 @@ function edgeStyle(st: Status, motion: boolean) {
   }
 }
 
-type GraphT = { roots: string[]; childrenOf: (id: string) => string[]; memberTables: string[]; whId: string; cyclic: boolean; nodeIds: string[] };
+type GraphT = { roots: string[]; childrenOf: (id: string) => string[]; warehouses: Map<string, string[]>; cyclic: boolean; nodeIds: string[] };
 type Pos = { cx: number; cy: number; left: number; top: number; w: number; h: number; col: number };
 type LayoutT = { pos: Map<string, Pos>; edges: { src: string; dst: string }[]; boardW: number; boardH: number; maxCol: number; degraded: boolean };
 
@@ -145,7 +134,7 @@ function computeLayout(graph: GraphT | null): LayoutT | null {
   for (const arr of byCol.values()) arr.sort((a, b) => orderIdx.get(a)! - orderIdx.get(b)!);
   let maxCol = 0, maxLanes = 1;
   for (const [c, arr] of byCol) { if (c > maxCol) maxCol = c; if (arr.length > maxLanes) maxLanes = arr.length; }
-  const heightOf = (id: string) => id === graph.whId ? Math.max(76, 52 + graph.memberTables.length * 26) : 76;
+  const heightOf = (id: string) => graph.warehouses.has(id) ? Math.max(76, 52 + graph.warehouses.get(id)!.length * 26) : 76;
   const boardH = Math.max(440, maxLanes * ROW + 56);
   const pos = new Map<string, Pos>();
   for (const [c, arr] of byCol) {
@@ -165,7 +154,7 @@ const prefersReduced = typeof window !== "undefined" && window.matchMedia ? wind
 const MOTION = !prefersReduced;
 
 type CtNode = {
-  node_id: string; node_type: string; name: string; app: string | null; label: string; url: string | null;
+  node_id: string; node_type: string; name: string; app: string | null; database: string; label: string; url: string | null;
   schedule_deployed: string | null; source_kind: string; ledger_table: string | null; ledger_ts_column: string | null;
   ledger_status_column: string | null; ledger_ok_values: string[] | null; ledger_detail_columns: string[] | null;
   ledger_valid: boolean | null;
@@ -173,11 +162,13 @@ type CtNode = {
 };
 type Edge = { src: string; dst: string };
 
-function collapseTables(nodeIds: Set<string>, edges: Edge[], tableIds: Set<string>, whId: string) {
+function collapseTables(nodeIds: Set<string>, edges: Edge[], tableIds: Set<string>, whOf: (id: string) => string) {
   const counts = new Map<string, number>();
+  const whs = new Set<string>();
+  const map = (id: string) => { if (tableIds.has(id)) { const w = whOf(id); whs.add(w); return w; } return id; };
   for (const e of edges) {
-    const src = tableIds.has(e.src) ? whId : e.src;
-    const dst = tableIds.has(e.dst) ? whId : e.dst;
+    const src = map(e.src);
+    const dst = map(e.dst);
     if (src === dst) continue;
     const k = `${src} ${dst}`;
     counts.set(k, (counts.get(k) || 0) + 1);
@@ -187,11 +178,11 @@ function collapseTables(nodeIds: Set<string>, edges: Edge[], tableIds: Set<strin
     const [src, dst] = k.split(" ");
     const rev = counts.get(`${dst} ${src}`) || 0;
     if (rev > n) continue;
-    if (rev === n && rev > 0 && src === whId) continue;
+    if (rev === n && rev > 0 && whs.has(src)) continue;
     out.push({ src, dst });
   }
   const outNodes = new Set([...nodeIds].filter((id) => !tableIds.has(id)));
-  if (tableIds.size) outNodes.add(whId);
+  for (const w of whs) outNodes.add(w);
   return { nodes: outNodes, edges: out };
 }
 function reduceTransitive(edges: Edge[]): Edge[] {
@@ -452,7 +443,7 @@ export default function ControlTower() {
   useEffect(() => { const id = setInterval(() => setNowMs(Date.now()), 60000); return () => clearInterval(id); }, []);
 
   const objectsQ = useSQLQuery(`
-    SELECT node_id, node_type, name, app, label, url,
+    SELECT node_id, node_type, name, app, database, label, url,
            schedule_deployed, source_kind, ledger_table, ledger_ts_column,
            ledger_status_column, ledger_ok_values, ledger_detail_columns, ledger_valid,
            strftime(last_run_ts, '%b %d %H:%M') AS last_run_at,
@@ -469,11 +460,9 @@ export default function ControlTower() {
            any_value(detail ORDER BY run_ts DESC) AS detail
     FROM "${DB}"."main"."ct_sync_ledger"
   `);
-  const vitalsQ = useSQLQuery(`
-    SELECT table_name, estimated_size AS n, 'table' AS kind FROM duckdb_tables() WHERE database_name = '${DB}'
-    UNION ALL
-    SELECT view_name AS table_name, NULL AS n, 'view' AS kind FROM duckdb_views() WHERE database_name = '${DB}' AND NOT internal
-  `);
+  // Precomputed by the collector (it reads each warehouse's catalog locally and
+  // merges the result here); the dive no longer introspects raw catalogs.
+  const vitalsQ = useSQLQuery(`SELECT name AS table_name, n, kind FROM "${DB}"."main"."ct_vitals"`);
 
   // Stamp the load time when objects actually arrive (covers manual refetch),
   // and measure client-side seconds elapsed since — folded into staleness below.
@@ -486,7 +475,7 @@ export default function ControlTower() {
     if (!raw.length) return nodesRef.current;
     nodesRef.current = raw.map((r: any) => ({
       node_id: String(r.node_id), node_type: String(r.node_type), name: String(r.name),
-      app: r.app == null ? null : String(r.app), label: String(r.label || ""), url: r.url == null ? null : String(r.url),
+      app: r.app == null ? null : String(r.app), database: String(r.database || ""), label: String(r.label || ""), url: r.url == null ? null : String(r.url),
       schedule_deployed: r.schedule_deployed == null ? null : String(r.schedule_deployed), source_kind: String(r.source_kind),
       ledger_table: r.ledger_table == null ? null : String(r.ledger_table), ledger_ts_column: r.ledger_ts_column == null ? null : String(r.ledger_ts_column),
       ledger_status_column: r.ledger_status_column == null ? null : String(r.ledger_status_column),
@@ -508,50 +497,19 @@ export default function ControlTower() {
   const apps = useMemo(() => [...new Set(nodes.map((n) => n.app).filter(Boolean))].sort() as string[], [nodes]);
   const activeApp = apps.includes(selectedApp) ? selectedApp : (apps[0] || "");
 
-  // A ledger the flight flagged invalid (ledger_valid === false) is excluded
-  // from every generated query — one bad table must not fail the whole union.
-  const hasLedger = (n: CtNode) => !!(n.ledger_table && n.ledger_ts_column && n.ledger_status_column) && n.ledger_valid !== false;
-  const healthSql = useMemo(() => {
-    const parts = nodes.filter(hasLedger).map((n) => {
-      const ok = (n.ledger_ok_values || []).map((v) => `'${String(v).replace(/'/g, "''")}'`).join(",") || "''";
-      return `SELECT ${qlit(n.node_id)} AS node_id, strftime(max(${qid(n.ledger_ts_column!)}), '%b %d %H:%M') AS last_at,
-        epoch(now() - max(${qid(n.ledger_ts_column!)})) AS age_s,
-        (any_value(${qid(n.ledger_status_column!)} ORDER BY ${qid(n.ledger_ts_column!)} DESC) IN (${ok})) AS is_ok,
-        any_value(${qid(n.ledger_status_column!)} ORDER BY ${qid(n.ledger_ts_column!)} DESC) AS last_status
-        FROM "${DB}"."main".${qid(n.ledger_table!)}`;
-    });
-    return parts.length ? parts.join("\nUNION ALL\n") : "";
-  }, [nodes]);
-  const healthQ = useSQLQuery(healthSql || "SELECT 1", { enabled: !!healthSql });
-
-  const runlogSql = useMemo(() => {
-    // Carry node_id (stable identity) alongside the display name so the panel
-    // resolves the object by id, never by an ambiguous name.
-    const parts = nodes.filter(hasLedger).map((n) =>
-      `SELECT ${qid(n.ledger_ts_column!)} AS ts, strftime(${qid(n.ledger_ts_column!)}, '%b %d %H:%M') AS run_at,
-        ${qlit(n.node_id)} AS node_id, ${qlit(n.name)} AS object_name, ${qid(n.ledger_status_column!)} AS status FROM "${DB}"."main".${qid(n.ledger_table!)}`);
-    return parts.length ? `SELECT run_at, node_id, object_name, status FROM (${parts.join(" UNION ALL ")}) ORDER BY ts DESC LIMIT 10` : "";
-  }, [nodes]);
-  const runlogQ = useSQLQuery(runlogSql || "SELECT 1", { enabled: !!runlogSql });
-
-  const deliveryFlight = useMemo(() => nodes.find((n) =>
-    n.app === activeApp && n.node_type === "flight" && hasLedger(n) &&
-    (n.ledger_detail_columns || []).length > 0 && allEdges.some((e) => e.src === n.node_id && e.dst.startsWith("delivery:"))) || null,
-    [nodes, allEdges, activeApp]);
-
-  const deliveriesSql = useMemo(() => {
-    if (!deliveryFlight) return "";
-    const cols = (deliveryFlight.ledger_detail_columns || []).map((c) => `${qid(c)}::VARCHAR AS ${qid(c)}`).join(", ");
-    return `SELECT strftime(${qid(deliveryFlight.ledger_ts_column!)}, '%b %d %H:%M') AS "__at", ${cols}
-      FROM "${DB}"."main".${qid(deliveryFlight.ledger_table!)} ORDER BY ${qid(deliveryFlight.ledger_ts_column!)} DESC LIMIT 8`;
-  }, [deliveryFlight]);
-  const deliveriesQ = useSQLQuery(deliveriesSql || "SELECT 1", { enabled: !!deliveriesSql });
+  // Health, run-log and deliveries are PRECOMPUTED by the collector (it reads the
+  // raw ledger tables locally, inside each warehouse's own account) and merged
+  // into the canonical DB. The dive reads fixed columns — no dynamic SQL, and it
+  // never reaches into producer tables that may live in another account.
+  const healthQ = useSQLQuery(`SELECT node_id, last_at, last_ts, is_ok, last_status FROM "${DB}"."main"."ct_health"`);
+  const runlogQ = useSQLQuery(`SELECT run_at, node_id, object_name, status FROM "${DB}"."main"."ct_runlog" ORDER BY ts DESC LIMIT 10`);
+  const deliveriesQ = useSQLQuery(`SELECT node_id, app, delivered_at, ts, recipient, status, is_ok FROM "${DB}"."main"."ct_deliveries" ORDER BY ts DESC`);
 
   const health = useMemo(() => {
-    const m = new Map<string, { last_at: string; age_s: number; is_ok: boolean; last_status: string }>();
+    const m = new Map<string, { last_at: string; is_ok: boolean; last_status: string }>();
     for (const r of Array.isArray(healthQ.data) ? (healthQ.data as any[]) : []) {
       if (r.node_id == null) continue;
-      m.set(String(r.node_id), { last_at: String(r.last_at || ""), age_s: N(r.age_s), is_ok: Boolean(r.is_ok), last_status: String(r.last_status || "") });
+      m.set(String(r.node_id), { last_at: String(r.last_at || ""), is_ok: Boolean(r.is_ok), last_status: String(r.last_status || "") });
     }
     return m;
   }, [healthQ.data]);
@@ -561,6 +519,25 @@ export default function ControlTower() {
     for (const r of Array.isArray(vitalsQ.data) ? (vitalsQ.data as any[]) : []) m.set(String(r.table_name), { n: r.n == null ? null : N(r.n), kind: String(r.kind || "table") });
     return m;
   }, [vitalsQ.data]);
+
+  // Deliveries: precomputed rows (recipient/status/is_ok), filtered to the active
+  // app client-side. hasDeliveryFlight is topology-only (a flight feeding a
+  // delivery node), so the "no delivery flight" vs "no deliveries yet" distinction
+  // survives the move off dynamic SQL.
+  const deliveries = useMemo(() => {
+    const raw = Array.isArray(deliveriesQ.data) ? (deliveriesQ.data as any[]) : [];
+    return raw.map((r) => ({
+      node_id: String(r.node_id), app: r.app == null ? "" : String(r.app),
+      delivered_at: String(r.delivered_at || ""),
+      recipient: r.recipient == null ? null : String(r.recipient),
+      status: r.status == null ? null : String(r.status), is_ok: Boolean(r.is_ok),
+    }));
+  }, [deliveriesQ.data]);
+  const hasDeliveryFlight = useMemo(() => nodes.some((n) =>
+    n.app === activeApp && n.node_type === "flight" &&
+    allEdges.some((e) => e.src === n.node_id && e.dst.startsWith("delivery:"))),
+    [nodes, allEdges, activeApp]);
+  const appDeliveries = useMemo(() => deliveries.filter((d) => d.app === activeApp).slice(0, 8), [deliveries, activeApp]);
 
   // Optional DB-set default theme: read ct_config.key='theme' IF that table
   // exists (gated on the catalog, so nothing errors when it's absent).
@@ -637,8 +614,10 @@ export default function ControlTower() {
     }
     const viewEdges = allEdges.filter((e) => e.kind === view && visible.has(e.src) && visible.has(e.dst));
     const tableIds = new Set([...visible].filter((id) => byId.get(id)?.node_type === "table"));
-    const whId = `warehouse:${DB}`;
-    const collapsed = collapseTables(visible, viewEdges, tableIds, whId);
+    // Each table collapses into ITS OWN warehouse (by the table's database), so a
+    // board can show N warehouses, not one. whOf maps a table node to its warehouse.
+    const whOf = (id: string) => `warehouse:${byId.get(id)?.database || WAREHOUSE}`;
+    const collapsed = collapseTables(visible, viewEdges, tableIds, whOf);
     const edges = reduceTransitive(collapsed.edges);
     const indeg = new Map<string, number>();
     for (const id of collapsed.nodes) indeg.set(id, 0);
@@ -647,11 +626,18 @@ export default function ControlTower() {
       .sort((a, b) => (TYPE_ORDER[a.split(":")[0]] ?? 9) - (TYPE_ORDER[b.split(":")[0]] ?? 9) || a.localeCompare(b));
     const childrenOf = (id: string) => edges.filter((e) => e.src === id).map((e) => e.dst)
       .sort((a, b) => (TYPE_ORDER[a.split(":")[0]] ?? 9) - (TYPE_ORDER[b.split(":")[0]] ?? 9) || a.localeCompare(b));
-    const memberTables = [...tableIds].map((id) => byId.get(id)!.name).sort();
+    // Member tables grouped per warehouse (for the warehouse cards + status).
+    const warehouses = new Map<string, string[]>();
+    for (const id of tableIds) {
+      const w = whOf(id);
+      if (!warehouses.has(w)) warehouses.set(w, []);
+      warehouses.get(w)!.push(byId.get(id)!.name);
+    }
+    for (const arr of warehouses.values()) arr.sort();
     const nodeIds = [...collapsed.nodes];
     // No root while nodes remain ⇒ a pure cycle: nothing to lay out from.
     const cyclic = nodeIds.length > 0 && roots.length === 0;
-    return { roots, childrenOf, memberTables, whId, cyclic, nodeIds };
+    return { roots, childrenOf, warehouses, cyclic, nodeIds };
   }
 
   const graph = useMemo(() => buildGraph(nodes.filter((n) => n.app === activeApp && n.source_kind === "code"), activeApp), [nodes, allEdges, byId, activeApp, view]);
@@ -678,7 +664,7 @@ export default function ControlTower() {
   };
 
   const whStatusFor = (mt: string[]): Status => mt.every((name) => { const v = vitals.get(name); return (v && v.kind === "view") || (v ? (v.n || 0) > 0 : false); }) ? "ok" : "warn";
-  const statusForNode = (id: string, g: GraphT): Status => id === g.whId ? whStatusFor(g.memberTables) : (statusOf.get(id) || "idle");
+  const statusForNode = (id: string, g: GraphT): Status => g.warehouses.has(id) ? whStatusFor(g.warehouses.get(id)!) : (statusOf.get(id) || "idle");
   const nameOf = (id: string) => { const n = byId.get(id); return n ? prettyName(n.name) : id; };
 
   // OVERALL (whole environment) — counts the boxes on the merged board, by state.
@@ -687,7 +673,7 @@ export default function ControlTower() {
     let ok = 0, warn = 0, fail = 0, idle = 0;
     if (fullLayout && fullGraph) {
       for (const id of fullLayout.pos.keys()) {
-        const s = id === fullGraph.whId ? whStatusFor(fullGraph.memberTables) : (statusOf.get(id) || "idle");
+        const s = fullGraph.warehouses.has(id) ? whStatusFor(fullGraph.warehouses.get(id)!) : (statusOf.get(id) || "idle");
         if (s === "fail") fail++; else if (s === "warn") warn++; else if (s === "ok") ok++; else idle++;
       }
     }
@@ -711,7 +697,7 @@ export default function ControlTower() {
   function renderNodeCardG(id: string, g: GraphT, lay: LayoutT, conn: Set<string> | null) {
     const p = lay.pos.get(id); if (!p) return null;
     const op = conn ? (conn.has(id) ? 1 : 0.3) : 1;
-    const isWh = id === g.whId;
+    const isWh = g.warehouses.has(id);
     const st: Status = statusForNode(id, g);
     const failAnim = st === "fail" && MOTION ? "ctbreathe 2.4s ease-in-out infinite" : "none";
     const base: any = {
@@ -720,14 +706,15 @@ export default function ControlTower() {
       boxShadow: C.cardShadow, opacity: op, animation: failAnim, display: "block",
     };
     if (isWh) {
-      const tables = g.memberTables.map((name) => { const v = vitals.get(name); return { name, rows: v ? v.n : null, kind: v ? v.kind : undefined }; });
+      const whName = byId.get(id)?.name || id.replace(/^warehouse:/, "");
+      const tables = (g.warehouses.get(id) || []).map((name) => { const v = vitals.get(name); return { name, rows: v ? v.n : null, kind: v ? v.kind : undefined }; });
       return (
         <a key={id} className="ct-node ct-link" href="https://app.motherduck.com" target="_blank" rel="noopener noreferrer" onMouseEnter={() => setHover(id)} onMouseLeave={() => setHover(null)} style={base}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 600, letterSpacing: ".13em", color: C.faint }}>WAREHOUSE</span>
             <Chip status={st} />
           </div>
-          <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{DB}</div>
+          <div style={{ marginTop: 6, fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{whName}</div>
           <div style={{ marginTop: 9, display: "flex", flexDirection: "column", gap: 5 }}>
             {tables.map((t) => {
               const ts: Status = t.kind === "view" ? "ok" : t.rows === null ? "warn" : t.rows > 0 ? "ok" : "warn";
@@ -963,7 +950,7 @@ export default function ControlTower() {
                     <span style={{ fontSize: 11.5, fontWeight: 600, color: sm(envStatus).text }}>{sm(envStatus).label}</span>
                   </span>
                 </div>
-                <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.muted2, marginTop: 5 }}>Full environment · {plural(overall.total, "object")} across {plural(apps.length, "app")} · all feeding {DB}</div>
+                <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.muted2, marginTop: 5 }}>Full environment · {plural(overall.total, "object")} across {plural(apps.length, "app")}{fullGraph && fullGraph.warehouses.size ? ` · ${plural(fullGraph.warehouses.size, "warehouse")}` : ""}</div>
               </div>
               {!fullGraph || !fullLayout ? (
                 <div style={{ maxWidth: 1180, margin: "0 auto", borderRadius: 16, border: `1px solid ${C.hair}`, background: C.board, padding: 28 }}>
@@ -979,8 +966,8 @@ export default function ControlTower() {
                   lay={fullLayout}
                   statusFn={(id) => statusForNode(id, fullGraph)}
                   infoFn={(id) =>
-                    id === fullGraph.whId
-                      ? { type: "warehouse", typeLabel: "WAREHOUSE", title: DB, meta: plural(fullGraph.memberTables.length, "table") }
+                    fullGraph.warehouses.has(id)
+                      ? { type: "warehouse", typeLabel: "WAREHOUSE", title: byId.get(id)?.name || id.replace(/^warehouse:/, ""), meta: plural(fullGraph.warehouses.get(id)!.length, "table") }
                       : (() => { const v = nodeView(id); return { type: v.type, typeLabel: v.typeLabel, title: v.title, meta: v.meta }; })()
                   }
                 />
@@ -1043,24 +1030,17 @@ export default function ControlTower() {
                 {RunsPanel}
                 <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "15px 17px" }}>
                   <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 10 }}>RECENT DELIVERIES</div>
-                  {!deliveryFlight ? (
+                  {!hasDeliveryFlight ? (
                     <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted2, padding: "8px 6px" }}>No delivery flight in this app.</div>
-                  ) : !Array.isArray(deliveriesQ.data) || deliveriesQ.data.length === 0 ? (
+                  ) : appDeliveries.length === 0 ? (
                     <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted2, padding: "8px 6px" }}>No deliveries yet.</div>
-                  ) : (deliveriesQ.data as any[]).map((r, i) => {
-                    const cols = deliveryFlight.ledger_detail_columns || [];
-                    const statusCol = deliveryFlight.ledger_status_column;
-                    const recipientCol = cols.find((c) => c !== statusCol) || cols[0];
-                    const sval = statusCol ? String(r[statusCol] ?? "") : "";
-                    const ok = (deliveryFlight.ledger_ok_values || []).includes(sval);
-                    return (
-                      <div key={i} style={{ display: "grid", gridTemplateColumns: "70px 1fr 26px", alignItems: "center", gap: 8, padding: "8px 6px", borderTop: i ? `1px solid ${C.hair}` : "none" }}>
-                        <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted2 }}>{String(r.__at)}</span>
-                        <span style={{ fontSize: 12.5, color: C.text2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{recipientCol ? String(r[recipientCol] ?? "—") : "—"}</span>
-                        <span style={{ justifySelf: "end" }}><Chip status={sval ? (ok ? "ok" : "fail") : "idle"} size={15} fs={9} /></span>
-                      </div>
-                    );
-                  })}
+                  ) : appDeliveries.map((r, i) => (
+                    <div key={`${r.node_id}:${r.delivered_at}:${i}`} style={{ display: "grid", gridTemplateColumns: "70px 1fr 26px", alignItems: "center", gap: 8, padding: "8px 6px", borderTop: i ? `1px solid ${C.hair}` : "none" }}>
+                      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted2 }}>{r.delivered_at}</span>
+                      <span style={{ fontSize: 12.5, color: C.text2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.recipient ?? "—"}</span>
+                      <span style={{ justifySelf: "end" }}><Chip status={r.status ? (r.is_ok ? "ok" : "fail") : "idle"} size={15} fs={9} /></span>
+                    </div>
+                  ))}
                 </div>
               </div>
 

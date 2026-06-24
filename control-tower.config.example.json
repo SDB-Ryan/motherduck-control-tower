@@ -1,0 +1,22 @@
+{
+  "_comment": "Control Tower account topology. Copy to control-tower.config.json and fill in. ONE flight per account (the collector) — no merge flight. Each account writes its graph into <ct_database>.<schema>; for multiple accounts, each non-main account shares its control_tower and the main account's collector folds the shares in. 'env' values must match your build-dive dives.config.json so account identity is verified on every write. Single account = just collect -> write (drop the extra accounts[] entries).",
+  "main_env": "main",
+  "schema": "main",
+  "accounts": [
+    {
+      "env": "main",
+      "is_main": true,
+      "ct_database": "control_tower",
+      "charted_databases": ["YOUR_DATABASE"],
+      "share_name": "control_tower_main"
+    },
+    {
+      "_comment": "Optional additional account (a producer). It runs its own collector and shares its control_tower; the main account's collector folds it in via INBOUND_SHARES (stamped at deploy).",
+      "env": "second_account",
+      "is_main": false,
+      "ct_database": "control_tower",
+      "charted_databases": ["YOUR_OTHER_DATABASE"],
+      "share_name": "control_tower_second"
+    }
+  ]
+}
