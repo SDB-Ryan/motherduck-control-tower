@@ -89,9 +89,31 @@ const clockHM = (ms: number) => { const d = new Date(ms); return `${String(d.get
 const agoLabel = (sec: number) => sec < 60 ? "just now" : sec < 3600 ? `${Math.floor(sec / 60)}m ago` : `${Math.floor(sec / 3600)}h ago`;
 
 const PITCH = 162, CX0 = 92, NODE_W = 150, ROW = 120;
+// ROWGAP keeps a normal 76px node at the old 120px pitch while letting tall warehouse
+// cards claim proportional room; DUMMY_LANE is the thin lane a routed long edge threads;
+// FAN is the max vertical spread of fan-in/out anchors (< circle R=24, so it's valid for
+// both the circle Overview and the rectangular board).
+const ROWGAP = ROW - 76, DUMMY_LANE = 34, FAN = 16, BAND_GAP = 34;
 function edgePathStr(ax: number, ay: number, bx: number, by: number): string {
   const c = Math.max(34, (bx - ax) * 0.5);
   return `M ${ax} ${ay} C ${ax + c} ${ay}, ${bx - c} ${by}, ${bx} ${by}`;
+}
+// Smooth left→right curve through waypoints. 2 points = the same horizontal-tangent
+// S-curve as edgePathStr; ≥3 points = one cubic per gap (Catmull-Rom-ish) with control
+// points biased horizontally so the line flows L→R and threads each lane without
+// overshooting into card corners.
+function splinePath(pts: { x: number; y: number }[]): string {
+  if (pts.length < 2) return "";
+  if (pts.length === 2) return edgePathStr(pts[0].x, pts[0].y, pts[1].x, pts[1].y);
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    const dx = p2.x - p1.x, t = 0.16;
+    const c1x = p1.x + dx * 0.5, c1y = p1.y + (p2.y - p0.y) * t;
+    const c2x = p2.x - dx * 0.5, c2y = p2.y - (p3.y - p1.y) * t;
+    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`;
+  }
+  return d;
 }
 function edgeStat(a: Status, b: Status): Status {
   const s = [a, b];
@@ -111,7 +133,11 @@ function edgeStyle(st: Status, motion: boolean) {
 
 type GraphT = { roots: string[]; childrenOf: (id: string) => string[]; warehouses: Map<string, string[]>; cyclic: boolean; nodeIds: string[] };
 type Pos = { cx: number; cy: number; left: number; top: number; w: number; h: number; col: number };
-type LayoutT = { pos: Map<string, Pos>; edges: { src: string; dst: string }[]; boardW: number; boardH: number; maxCol: number; degraded: boolean };
+// A drawn edge: keeps src/dst identity (hover highlighting keys off them), and carries its
+// resolved geometry — sy/dy = the fanned anchor Y where it leaves src / enters dst, way =
+// the per-column lane waypoints a multi-column edge routes through (empty for short edges).
+type RoutedEdge = { src: string; dst: string; sy: number; dy: number; way: { x: number; y: number }[] };
+type LayoutT = { pos: Map<string, Pos>; edges: RoutedEdge[]; boardW: number; boardH: number; maxCol: number; degraded: boolean };
 
 // Pure structural layout — assigns (x,y) + dynamic board height. Works for any
 // graph (a single app, or the whole environment merged). Presentation only.
@@ -129,25 +155,137 @@ function computeLayout(graph: GraphT | null): LayoutT | null {
   // cap, the visible graph has a cycle and the column assignment is meaningless.
   const degraded = ch;
   const orderIdx = new Map(order.map((id, i) => [id, i]));
-  const byCol = new Map<number, string[]>();
-  for (const id of allNodes) { const c = col.get(id)!; if (!byCol.has(c)) byCol.set(c, []); byCol.get(c)!.push(id); }
-  for (const arr of byCol.values()) arr.sort((a, b) => orderIdx.get(a)! - orderIdx.get(b)!);
-  let maxCol = 0, maxLanes = 1;
-  for (const [c, arr] of byCol) { if (c > maxCol) maxCol = c; if (arr.length > maxLanes) maxLanes = arr.length; }
   const heightOf = (id: string) => graph.warehouses.has(id) ? Math.max(76, 52 + graph.warehouses.get(id)!.length * 26) : 76;
-  const boardH = Math.max(440, maxLanes * ROW + 56);
-  const pos = new Map<string, Pos>();
-  for (const [c, arr] of byCol) {
-    const k = arr.length;
-    arr.forEach((id, idx) => {
-      const cy = boardH / 2 + (idx - (k - 1) / 2) * ROW;
-      const cx = CX0 + c * PITCH;
-      const h = heightOf(id);
-      pos.set(id, { cx, cy, left: cx - NODE_W / 2, top: cy - h / 2, w: NODE_W, h, col: c });
-    });
+
+  // Degraded (cyclic): columns are meaningless, so just center each column by DFS
+  // order — the caller renders an error panel over this, never the graph itself.
+  if (degraded) {
+    const byCol = new Map<number, string[]>();
+    for (const id of allNodes) { const c = col.get(id)!; if (!byCol.has(c)) byCol.set(c, []); byCol.get(c)!.push(id); }
+    for (const arr of byCol.values()) arr.sort((a, b) => orderIdx.get(a)! - orderIdx.get(b)!);
+    let mc = 0, ml = 1;
+    for (const [c, arr] of byCol) { if (c > mc) mc = c; if (arr.length > ml) ml = arr.length; }
+    const bH = Math.max(440, ml * ROW + 56);
+    const pos = new Map<string, Pos>();
+    for (const [c, arr] of byCol) { const k = arr.length; arr.forEach((id, idx) => { const cy = bH / 2 + (idx - (k - 1) / 2) * ROW; const cx = CX0 + c * PITCH; const h = heightOf(id); pos.set(id, { cx, cy, left: cx - NODE_W / 2, top: cy - h / 2, w: NODE_W, h, col: c }); }); }
+    const re: RoutedEdge[] = edges.map((e) => ({ src: e.src, dst: e.dst, sy: pos.get(e.src)!.cy, dy: pos.get(e.dst)!.cy, way: [] }));
+    return { pos, edges: re, boardW: Math.max(620, CX0 + mc * PITCH + NODE_W / 2 + 28), boardH: bH, maxCol: mc, degraded };
   }
+
+  // ── Sugiyama-style layered layout (DAG) ──────────────────────────────────
+  // Reserved-prefix dummy ids; real ids are "<type>:<name>" so "~dummy " can't collide.
+  const DUM = "~dummy ";
+  type ChainE = { src: string; dst: string; chain: string[] };
+  const typeRank = (id: string) => id.startsWith(DUM) ? 9 : (TYPE_ORDER[id.split(":")[0]] ?? 8);
+  const cmpId = (a: string, b: string) => (typeRank(a) - typeRank(b)) || a.localeCompare(b);
+
+  // Weakly-connected components = apps that actually share data. Each becomes a vertical
+  // band so one app's edges stay local instead of detouring across the whole board; a node
+  // shared by several apps (e.g. one warehouse feeding many) correctly merges them into one
+  // band — soft grouping by real connectivity, never forced lanes.
+  const root = new Map<string, string>();
+  const find = (x: string): string => { let r = x; while (root.get(r) !== r) r = root.get(r)!; while (root.get(x) !== r) { const n = root.get(x)!; root.set(x, r); x = n; } return r; };
+  for (const id of allNodes) root.set(id, id);
+  for (const e of edges) { const ra = find(e.src), rb = find(e.dst); if (ra !== rb) root.set(ra, rb); }
+  const compMin = new Map<string, number>();
+  for (const id of allNodes) { const r = find(id), o = orderIdx.get(id)!; if (!compMin.has(r) || o < compMin.get(r)!) compMin.set(r, o); }
+  const compRank = new Map([...compMin.entries()].sort((a, b) => (a[1] - b[1]) || a[0].localeCompare(b[0])).map(([r], i) => [r, i] as [string, number]));
+  const crank = new Map<string, number>();
+  for (const id of allNodes) crank.set(id, compRank.get(find(id))!);
+
+  // Per-column layers of real + dummy nodes; a long edge becomes a real→dummy→…→real
+  // unit-span path so ordering + routing treat it like any other edge.
+  const layers = new Map<number, string[]>();
+  const addLayer = (c: number, id: string) => { if (!layers.has(c)) layers.set(c, []); layers.get(c)!.push(id); };
+  for (const id of allNodes) addLayer(col.get(id)!, id);
+  const down = new Map<string, string[]>(), up = new Map<string, string[]>();
+  const link = (a: string, b: string) => { (down.get(a) || down.set(a, []).get(a)!).push(b); (up.get(b) || up.set(b, []).get(b)!).push(a); };
+  const dcol = new Map<string, number>();
+  const chains: ChainE[] = [];
+  for (const e of edges) {
+    const cs = col.get(e.src)!, cd = col.get(e.dst)!;
+    if (cd - cs <= 1) { link(e.src, e.dst); chains.push({ src: e.src, dst: e.dst, chain: [] }); continue; }
+    const chain: string[] = []; let prev = e.src;
+    for (let c = cs + 1; c < cd; c++) { const d = `${DUM}${e.src}|${e.dst}|${c}`; addLayer(c, d); dcol.set(d, c); crank.set(d, crank.get(e.src)!); chain.push(d); link(prev, d); prev = d; }
+    link(prev, e.dst); chains.push({ src: e.src, dst: e.dst, chain });
+  }
+  let maxCol = 0; for (const c of layers.keys()) if (c > maxCol) maxCol = c;
+
+  // Initial within-layer order: real by DFS order, dummy by its endpoints' average.
+  const initKey = new Map<string, number>();
+  for (const id of allNodes) initKey.set(id, orderIdx.get(id)!);
+  for (const { src, dst, chain } of chains) { const avg = ((orderIdx.get(src) ?? 0) + (orderIdx.get(dst) ?? 0)) / 2; for (const d of chain) initKey.set(d, avg); }
+  for (const arr of layers.values()) arr.sort((a, b) => (crank.get(a)! - crank.get(b)!) || (initKey.get(a)! - initKey.get(b)!) || cmpId(a, b));
+
+  // Median crossing-minimization: 4 down+up sweeps. Deterministic — a no-neighbor
+  // node keeps its current index; ties break by index then id (no random/time).
+  const medianOf = (id: string, neigh: Map<string, string[]>, pm: Map<string, number>) => {
+    const ns = (neigh.get(id) || []).map((n) => pm.get(n)!).filter((i) => i !== undefined).sort((x, y) => x - y);
+    if (!ns.length) return -1; const m = ns.length; return (ns[(m - 1) >> 1] + ns[m >> 1]) / 2;
+  };
+  const sweep = (c: number, adj: number, neigh: Map<string, string[]>) => {
+    const arr = layers.get(c); if (!arr) return;
+    const pm = new Map((layers.get(adj) || []).map((id, i) => [id, i] as [string, number]));
+    const cur = new Map(arr.map((id, i) => [id, i] as [string, number]));
+    const med = new Map(arr.map((id) => { const m = medianOf(id, neigh, pm); return [id, m < 0 ? cur.get(id)! : m] as [string, number]; }));
+    arr.sort((a, b) => (crank.get(a)! - crank.get(b)!) || (med.get(a)! - med.get(b)!) || (cur.get(a)! - cur.get(b)!) || cmpId(a, b));
+  };
+  for (let it = 0; it < 4; it++) {
+    for (let c = 1; c <= maxCol; c++) sweep(c, c - 1, up);
+    for (let c = maxCol - 1; c >= 0; c--) sweep(c, c + 1, down);
+  }
+
+  // Height-aware stacking inside per-component bands: each slot (a node, or a thin dummy
+  // lane) claims its own height; a component's band is fixed across all columns so its
+  // edges stay within the band. Also fixes tall-warehouse overlap.
+  const slotH = (id: string) => id.startsWith(DUM) ? DUMMY_LANE : heightOf(id) + ROWGAP;
+  const bandH = new Map<number, number>();
+  for (const [, arr] of layers) {
+    const per = new Map<number, number>();
+    for (const id of arr) { const r = crank.get(id)!; per.set(r, (per.get(r) || 0) + slotH(id)); }
+    for (const [r, h] of per) if (h > (bandH.get(r) || 0)) bandH.set(r, h);
+  }
+  const ranks = [...bandH.keys()].sort((a, b) => a - b);
+  let totalH = 0; ranks.forEach((r, i) => { totalH += bandH.get(r)! + (i ? BAND_GAP : 0); });
+  const boardH = Math.max(440, totalH + 56);
+  const bandTop = new Map<number, number>(); let cursor = (boardH - totalH) / 2;
+  for (const r of ranks) { bandTop.set(r, cursor); cursor += bandH.get(r)! + BAND_GAP; }
+  const yOf = new Map<string, number>(); const pos = new Map<string, Pos>();
+  for (const [c, arr] of layers) {
+    const cx = CX0 + c * PITCH;
+    let i = 0;
+    while (i < arr.length) {
+      const r = crank.get(arr[i])!; let j = i, slice = 0;
+      while (j < arr.length && crank.get(arr[j])! === r) { slice += slotH(arr[j]); j++; }
+      let running = bandTop.get(r)! + bandH.get(r)! / 2 - slice / 2;
+      for (let k = i; k < j; k++) { const id = arr[k], sh = slotH(id), cy = running + sh / 2; running += sh; yOf.set(id, cy); if (!id.startsWith(DUM)) { const h = heightOf(id); pos.set(id, { cx, cy, left: cx - NODE_W / 2, top: cy - h / 2, w: NODE_W, h, col: c }); } }
+      i = j;
+    }
+  }
+
+  // Fan-in/out anchors: spread a node's edges across distinct points (±FAN) on its
+  // face, ordered by where each is heading, so a 1→many fan / many→1 merge reads as
+  // separated strands instead of one overlapping bundle.
+  const firstY = (ec: ChainE) => yOf.get(ec.chain.length ? ec.chain[0] : ec.dst)!;
+  const lastY = (ec: ChainE) => yOf.get(ec.chain.length ? ec.chain[ec.chain.length - 1] : ec.src)!;
+  const outOf = new Map<string, ChainE[]>(), inOf = new Map<string, ChainE[]>();
+  for (const ec of chains) { (outOf.get(ec.src) || outOf.set(ec.src, []).get(ec.src)!).push(ec); (inOf.get(ec.dst) || inOf.set(ec.dst, []).get(ec.dst)!).push(ec); }
+  const syOf = new Map<ChainE, number>(), dyOf = new Map<ChainE, number>();
+  const fan = (node: string, list: ChainE[], keyY: (e: ChainE) => number, otherId: (e: ChainE) => string, into: Map<ChainE, number>) => {
+    list.sort((p, q) => (keyY(p) - keyY(q)) || cmpId(otherId(p), otherId(q)));
+    const k = list.length, cy = yOf.get(node)!, step = k > 1 ? (2 * FAN) / (k - 1) : 0;
+    list.forEach((ec, i) => { const off = (i - (k - 1) / 2) * step; into.set(ec, Math.max(cy - FAN, Math.min(cy + FAN, cy + off))); });
+  };
+  for (const [node, list] of outOf) fan(node, list, firstY, (e) => e.dst, syOf);
+  for (const [node, list] of inOf) fan(node, list, lastY, (e) => e.src, dyOf);
+
+  const routed: RoutedEdge[] = chains.map((ec) => ({
+    src: ec.src, dst: ec.dst,
+    sy: syOf.get(ec) ?? yOf.get(ec.src)!, dy: dyOf.get(ec) ?? yOf.get(ec.dst)!,
+    way: ec.chain.map((d) => ({ x: CX0 + dcol.get(d)! * PITCH, y: yOf.get(d)! })),
+  }));
   const boardW = Math.max(620, CX0 + maxCol * PITCH + NODE_W / 2 + 28);
-  return { pos, edges, boardW, boardH, maxCol, degraded };
+  return { pos, edges: routed, boardW, boardH, maxCol, degraded };
 }
 
 const prefersReduced = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)").matches : false;
@@ -323,10 +461,13 @@ function NetworkView({ lay, statusFn, infoFn }: { lay: LayoutT; statusFn: (id: s
         <g transform={`translate(${vt.x} ${vt.y}) scale(${vt.s})`}>
           {lay.edges.map((e, i) => {
             const a = lay.pos.get(e.src)!, b = lay.pos.get(e.dst)!;
+            const sx = a.cx + Math.sqrt(Math.max(0, R * R - (e.sy - a.cy) ** 2));
+            const ex = b.cx - Math.sqrt(Math.max(0, R * R - (e.dy - b.cy) ** 2));
+            const d = splinePath([{ x: sx, y: e.sy }, ...e.way, { x: ex, y: e.dy }]);
             const sty = edgeStyle(edgeStat(statusFn(e.src), statusFn(e.dst)), MOTION);
             let op = sty.op, w = sty.w;
             if (hover) { const hot = e.src === hover || e.dst === hover; op = hot ? Math.min(1, sty.op + 0.35) : sty.op * 0.18; if (hot) w = sty.w + 1; }
-            return <path key={i} d={edgePathStr(a.cx + R, a.cy, b.cx - R, b.cy)} fill="none" stroke={sty.stroke} strokeWidth={w} strokeDasharray={sty.dash} strokeLinecap="round" opacity={op} style={{ animation: sty.anim }} />;
+            return <path key={i} d={d} fill="none" stroke={sty.stroke} strokeWidth={w} strokeDasharray={sty.dash} strokeLinecap="round" opacity={op} style={{ animation: sty.anim }} />;
           })}
           {[...lay.pos.keys()].map((id) => {
             const p = lay.pos.get(id)!; const st = statusFn(id); const m = sm(st); const info = infoFn(id);
@@ -759,7 +900,7 @@ export default function ControlTower() {
             ))}
             {lay.edges.map((e, i) => {
               const a = lay.pos.get(e.src)!, b = lay.pos.get(e.dst)!;
-              const d = edgePathStr(a.left + a.w, a.cy, b.left, b.cy);
+              const d = splinePath([{ x: a.left + a.w, y: e.sy }, ...e.way, { x: b.left, y: e.dy }]);
               const sty = edgeStyle(edgeStat(statusForNode(e.src, g), statusForNode(e.dst, g)), MOTION);
               let op = sty.op, w = sty.w;
               if (hover) { const hot = e.src === hover || e.dst === hover; op = hot ? Math.min(1, sty.op + 0.35) : sty.op * 0.2; if (hot) w = sty.w + 0.9; }

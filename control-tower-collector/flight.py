@@ -45,7 +45,7 @@ CT_DATABASE = "control_tower"
 SCHEMA = "main"                # single schema: ct_* AND ct_registry all live here
 CHARTED_DATABASES = ["YOUR_DATABASE"]
 IS_MAIN = True                 # the main account folds other accounts' shares into its own graph
-INBOUND_SHARES = []            # main only: [{"alias","url"}] of other accounts' control_tower shares
+INBOUND_SHARES = []  # main only: see INSTALL Step 6
 STALE_HOURS = 36              # a folded-in share older than this raises a stale-account issue
 LEDGER = "ct_sync_ledger"     # the collector's own run ledger (in CT_DATABASE.SCHEMA)
 
