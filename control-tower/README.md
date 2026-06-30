@@ -1,44 +1,33 @@
-# Control Tower
+# Control Tower — the dive
 
-Manifest-driven ops console: the data-flow graph is rendered entirely from
-`ct_objects` / `ct_edges` / `ct_issues` (built by the `manifest-sync`
-flight) — zero hardcoded nodes. This replaced the hardcoded v1 on
-2026-06-10 after Ryan confirmed it renders the identical picture (v1
-lives in git history at `control-tower/control-tower/` pre-rename).
+The console UI: a **read-only** MotherDuck dive that renders the data-flow graph and ops
+panels entirely from the `ct_*` tables in `control_tower.main` (built by the collector
+flight) — zero hardcoded nodes. See the [main README](../README.md) for what Control Tower
+is and [INSTALL.md](../INSTALL.md) to install it.
 
-- **Environment:** main
-- **Database:** YOUR_DATABASE
-- **Share:** (none yet — local preview only, unpublished)
+## Data sources (all read-only)
 
-## Data sources
-
-- `ct_objects`, `ct_edges`, `ct_issues`, `ct_sync_ledger` — the graph and
-  its problems, from manifest-sync.
-- Every ledger table declared in a manifest's `ledger` block — health is
-  ONE generic UNION query built client-side from those declarations.
-- `duckdb_tables()` — live row counts for the warehouse box (no per-table
-  code, and a declared-but-missing table shows as "table not found").
+- `ct_objects`, `ct_edges`, `ct_issues` — the graph and its problems.
+- `ct_health`, `ct_runlog`, `ct_deliveries` — precomputed ops panels (the dive never queries
+  raw ledger tables).
+- `ct_vitals` — live row counts for the charted warehouse(s).
+- `ct_meta` / `ct_sync_ledger` — freshness (last sync, last collector run).
+- `ct_hidden` — objects intentionally excluded from the graph.
 
 ## How rendering works
 
-1. BFS from the selected app's code objects over all edges (never walking
-   into another app's code objects) → the visible subgraph.
+1. Per app, BFS from the app's code objects over `ct_edges` → the visible subgraph (never
+   walking into another app's code objects).
 2. Filter edges by the logical/physical toggle (`ct_edges.kind`).
-3. Collapse all table nodes into one warehouse super-node (members listed
-   inside the box). Opposite-direction collapsed edges (a flight reads AND
-   writes warehouse tables) keep the majority direction.
-4. Transitive reduction (drops e.g. the flight→share shortcut when
+3. Collapse each app's table nodes into their warehouse node — one per charted database, so a
+   board can show several warehouses; members are listed inside the box. Opposite-direction
+   collapsed edges (a flight that reads *and* writes warehouse tables) keep the majority
+   direction.
+4. Transitive reduction drops redundant shortcuts (e.g. flight→share when
    flight→warehouse→share already tells the story).
-5. Recursive linear-with-forks walk from the roots — column-per-depth,
-   Fork component for fan-out. Arbitrary DAG layout is out of scope.
+5. Layered left-to-right layout from the roots; a dependency cycle is reported as an issue,
+   not drawn.
 
-## Differences vs the retired v1 (deliberate)
-
-- Table freshness ("thru Mar 2026") is gone — the period column is
-  table-specific knowledge no manifest declares. Row counts remain.
-- "Recent deliveries" is back (2026-06-10, same day) but manifest-driven:
-  a delivery-feeding flight declares `ledger.detail_columns` and the panel
-  renders exactly those columns. No declaration, no panel.
-- New: ct_issues warnings strip, per-app graphs (control-tower app shows
-  its own catalog→sync→warehouse flow), sync-freshness footer, "stale"
-  warn state when a scheduled flight's latest ok run is >36h old.
+Freshness (last sync + last load) and a refresh control sit in the content header. The
+Overview merges every app into one environment-wide graph; per-app views add the
+logical/physical toggle.

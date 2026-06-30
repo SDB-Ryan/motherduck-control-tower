@@ -14,6 +14,14 @@ const SERIF = "Georgia, 'Times New Roman', serif";
 const DB = "control_tower";                    // canonical Control Tower DB the dive reads (all ct_* tables)
 const WAREHOUSE = "YOUR_DATABASE";  // fallback only: a table with no database collapses here. Normally each table collapses into warehouse:<its own database>, so a board can show N warehouses.
 
+// About tab: a "what is this / how it works / where to get it" pane. Ships in both the
+// gallery dive and the OSS download. Set to false to hide it.
+const ABOUT = true;
+// Explainer video. Set to a YouTube video ID once recorded & uploaded; until then the
+// About pane omits the video box entirely.
+const VIDEO_ID = "";
+const REPO_URL = "https://github.com/SDB-Ryan/motherduck-control-tower";
+
 // Two palettes; the active one (C) is swapped per theme at render time. Every
 // style reads C, so switching themes is a single reassignment.
 const DARK = {
@@ -572,7 +580,7 @@ function GraphErrorPanel({ title, intro, details, nodeIds, nameOf, maxW }: { tit
 export default function ControlTower() {
   const [selectedApp, setSelectedApp] = useDiveState("app", "");
   const [view, setView] = useDiveState<"logical" | "physical">("view", "logical");
-  const [pane, setPane] = useDiveState<"overview" | "graph" | "hidden">("pane", "overview");
+  const [pane, setPane] = useDiveState<"overview" | "graph" | "hidden" | "about">("pane", "overview");
   const [themePref, setThemePref] = useDiveState<"light" | "dark" | "">("theme", "");
   const [hover, setHover] = useState<string | null>(null);
   // Honest freshness: a dive loads a snapshot and doesn't auto-poll, so stamp
@@ -958,6 +966,24 @@ export default function ControlTower() {
   // native button look so the inline styling carries through unchanged.
   const navRow = (active: boolean): any => ({ display: "flex", gap: 9, alignItems: "center", cursor: "pointer", borderRadius: 10, padding: 9, background: active ? C.rowHover : "transparent", marginBottom: 2, border: "none", width: "100%", textAlign: "left", font: "inherit", color: "inherit" });
 
+  // Freshness stamp for the content header (data views only): when the graph was
+  // last synced + when this view loaded, with a refresh button.
+  const freshStamp = (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: MONO, fontSize: 11, color: C.muted }} title="When manifest-sync last rebuilt the graph">
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.accent, animation: MOTION ? "ctsync 2.4s ease-in-out infinite" : "none" }} />
+          {syncRow && syncRow.synced_at ? `Synced ${String(syncRow.synced_at)} UTC` : "Not synced"}
+        </span>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }} title="When this view last loaded a snapshot">Checked {clockHM(loadedAt)} · {agoLabel(elapsedSec)}</span>
+      </div>
+      <button type="button" onClick={refreshAll} title="Refresh data" aria-label="Refresh data"
+        style={{ width: 28, height: 28, borderRadius: 7, border: `1px solid ${C.hair}`, background: C.btnBg, color: C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M13.5 8 a5.5 5.5 0 1 1 -1.6 -3.9 M12.5 1.5 V4.5 H9.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      </button>
+    </div>
+  );
+
   // Recent-runs table (used in both overview and per-app).
   const RunsPanel = (
     <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "15px 17px" }}>
@@ -1002,6 +1028,7 @@ export default function ControlTower() {
               <span style={{ fontFamily: SANS, fontSize: 15, fontWeight: 600, color: C.text }}>{overall.total}</span> object{overall.total === 1 ? "" : "s"} · {apps.length} app{apps.length === 1 ? "" : "s"}
             </div>
           </div>
+
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {([["ok", overall.ok], ["warn", overall.warn], ["fail", overall.fail], ["idle", overall.idle]] as [Status, number][]).map(([s, n]) => {
               const m = sm(s);
@@ -1044,29 +1071,27 @@ export default function ControlTower() {
                 </button>
               );
             })}
-            {hidden.length ? (
-              <button type="button" className="ct-app" aria-current={pane === "hidden" ? "page" : undefined} onClick={() => { setPane("hidden"); setHover(null); }} style={{ ...navRow(pane === "hidden"), marginTop: 4 }}>
-                <span style={{ width: 2, borderRadius: 2, background: C.accent, opacity: pane === "hidden" ? 1 : 0, flexShrink: 0, alignSelf: "stretch" }} />
-                <EyeOff color={pane === "hidden" ? C.text : C.muted} />
-                <span style={{ fontSize: 13, fontWeight: 600, color: pane === "hidden" ? C.text : C.text2 }}>Hidden objects</span>
-                <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 11, color: C.faint }}>{hidden.length}</span>
-              </button>
-            ) : null}
           </div>
 
-          <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 8, padding: "10px 11px", border: `1px solid ${C.hair}`, borderRadius: 10, background: C.inset }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9 }} title="When manifest-sync last rebuilt the graph">
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent, animation: MOTION ? "ctsync 2.4s ease-in-out infinite" : "none", flexShrink: 0 }} />
-              <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>{syncRow && syncRow.synced_at ? `Synced ${String(syncRow.synced_at)} UTC` : "Not synced"}</span>
+          {(hidden.length || ABOUT) ? (
+            <div style={{ marginTop: "auto" }}>
+              {hidden.length ? (
+                <button type="button" className="ct-app" aria-current={pane === "hidden" ? "page" : undefined} onClick={() => { setPane("hidden"); setHover(null); }} style={navRow(pane === "hidden")}>
+                  <span style={{ width: 2, borderRadius: 2, background: C.accent, opacity: pane === "hidden" ? 1 : 0, flexShrink: 0, alignSelf: "stretch" }} />
+                  <EyeOff color={pane === "hidden" ? C.text : C.muted} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: pane === "hidden" ? C.text : C.text2 }}>Hidden objects</span>
+                  <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 11, color: C.faint }}>{hidden.length}</span>
+                </button>
+              ) : null}
+              {ABOUT ? (
+                <button type="button" className="ct-app" aria-current={pane === "about" ? "page" : undefined} onClick={() => { setPane("about"); setHover(null); }} style={{ ...navRow(pane === "about"), marginTop: hidden.length ? 4 : 0 }}>
+                  <span style={{ width: 2, borderRadius: 2, background: C.accent, opacity: pane === "about" ? 1 : 0, flexShrink: 0, alignSelf: "stretch" }} />
+                  <ApertureMark size={15} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: pane === "about" ? C.text : C.text2 }}>About</span>
+                </button>
+              ) : null}
             </div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }} title="When this view last loaded a snapshot">Checked {clockHM(loadedAt)} · {agoLabel(elapsedSec)}</span>
-              <button type="button" onClick={refreshAll} title="Refresh data" aria-label="Refresh data"
-                style={{ width: 26, height: 26, borderRadius: 7, border: `1px solid ${C.hair}`, background: C.btnBg, color: C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M13.5 8 a5.5 5.5 0 1 1 -1.6 -3.9 M12.5 1.5 V4.5 H9.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              </button>
-            </div>
-          </div>
+          ) : null}
         </aside>
 
         {/* MAIN */}
@@ -1083,15 +1108,18 @@ export default function ControlTower() {
           ) : null}
           {pane === "overview" ? (
             <>
-              <div style={{ maxWidth: 1180, margin: "0 auto 18px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 22, fontWeight: 600, color: C.text }}>Overview</span>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 9px 4px 7px", borderRadius: 999, background: sm(envStatus).bg }}>
-                    <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: sm(envStatus).text }}>{sm(envStatus).glyph}</span>
-                    <span style={{ fontSize: 11.5, fontWeight: 600, color: sm(envStatus).text }}>{sm(envStatus).label}</span>
-                  </span>
+              <div style={{ maxWidth: 1180, margin: "0 auto 18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 22, fontWeight: 600, color: C.text }}>Overview</span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 9px 4px 7px", borderRadius: 999, background: sm(envStatus).bg }}>
+                      <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: sm(envStatus).text }}>{sm(envStatus).glyph}</span>
+                      <span style={{ fontSize: 11.5, fontWeight: 600, color: sm(envStatus).text }}>{sm(envStatus).label}</span>
+                    </span>
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.muted2, marginTop: 5 }}>Full environment · {plural(overall.total, "object")} across {plural(apps.length, "app")}{fullGraph && fullGraph.warehouses.size ? ` · ${plural(fullGraph.warehouses.size, "warehouse")}` : ""}</div>
                 </div>
-                <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.muted2, marginTop: 5 }}>Full environment · {plural(overall.total, "object")} across {plural(apps.length, "app")}{fullGraph && fullGraph.warehouses.size ? ` · ${plural(fullGraph.warehouses.size, "warehouse")}` : ""}</div>
+                {freshStamp}
               </div>
               {!fullGraph || !fullLayout ? (
                 <div style={{ maxWidth: 1180, margin: "0 auto", borderRadius: 16, border: `1px solid ${C.hair}`, background: C.board, padding: 28 }}>
@@ -1137,6 +1165,116 @@ export default function ControlTower() {
                 })}
               </div>
             </>
+          ) : pane === "about" ? (
+            <div style={{ maxWidth: 860, margin: "0 auto" }}>
+              <div style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <ApertureMark size={22} />
+                  <span style={{ fontSize: 22, fontWeight: 600, color: C.text }}>About Control Tower</span>
+                </div>
+                <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.muted2, marginTop: 5 }}>What this is, how it works, and where to get it.</div>
+              </div>
+
+              {/* Explainer video (16:9) — renders only when VIDEO_ID is set. Until then the
+                  About tab shows no video box; paste the recorded video's ID to slot it back in. */}
+              {VIDEO_ID ? (
+                <div style={{ position: "relative", width: "100%", aspectRatio: "16 / 9", borderRadius: 14, overflow: "hidden", border: `1px solid ${C.hair}`, background: C.board, boxShadow: C.cardShadow, marginBottom: 18 }}>
+                  <iframe
+                    src={`https://www.youtube.com/embed/${VIDEO_ID}`}
+                    title="Control Tower — how it works"
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                  />
+                </div>
+              ) : null}
+
+              <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "16px 19px", marginBottom: 14 }}>
+                <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 9 }}>WHAT IT IS</div>
+                <div style={{ fontSize: 14.5, lineHeight: 1.65, color: C.text2 }}>
+                  Control Tower is the map and the monitor for your MotherDuck pipelines. It draws the
+                  data-flow graph across your warehouses — every dive, flight, table, and share, and how
+                  data moves between them — and tracks the health of the jobs keeping it running: what ran,
+                  what&apos;s stale, what failed, what isn&apos;t cataloged yet. You keep a small lineage
+                  catalog; it draws and watches the rest. It&apos;s read-only — it never touches your data.
+                </div>
+              </div>
+
+              <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "16px 19px", marginBottom: 14 }}>
+                <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 12 }}>HOW IT WORKS</div>
+                {([
+                  ["Catalog", "You register each dive and flight in a ct_registry table with the build-manifest skill — what it reads, writes, and delivers. No edits to the object's source."],
+                  ["Collect", "A scheduled collector flight (one per account) reads the registry plus the live catalog and materializes the graph and ops panels as ct_* tables: run health, row counts, recent runs, deliveries, warnings."],
+                  ["Render", "This dive reads those tables and draws it: per-app lineage, a logical/physical toggle, live status on every node, and a warnings strip for cycles, bad ledgers, or anything not yet cataloged."],
+                ] as [string, string][]).map(([t, d], i) => (
+                  <div key={t} style={{ display: "flex", gap: 13, padding: "10px 0", borderTop: i ? `1px solid ${C.hair}` : "none" }}>
+                    <span style={{ flexShrink: 0, width: 24, height: 24, borderRadius: 7, background: C.accentTint, color: C.accent, fontFamily: MONO, fontSize: 12, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{i + 1}</span>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{t}</div>
+                      <div style={{ fontSize: 13.5, lineHeight: 1.6, color: C.muted, marginTop: 2 }}>{d}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "16px 19px", marginBottom: 14 }}>
+                <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 9 }}>SCOPE — MANY WAREHOUSES, MANY ACCOUNTS</div>
+                <div style={{ fontSize: 14.5, lineHeight: 1.65, color: C.text2 }}>
+                  Control Tower isn&apos;t limited to one database. A single board charts every warehouse you
+                  put in scope, and a main account folds in other accounts&apos; boards over read-only shares —
+                  so you can watch your whole MotherDuck footprint, across accounts, in one graph. Anything
+                  pointing at a warehouse you haven&apos;t charted isn&apos;t silently dropped or forced onto
+                  the map — you get a warning counting how many objects fall outside your charted databases,
+                  and which databases those are.
+                </div>
+              </div>
+
+              <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "16px 19px", marginBottom: 14 }}>
+                <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 9 }}>WHAT IT FLAGS</div>
+                <div style={{ fontSize: 14.5, lineHeight: 1.65, color: C.text2 }}>
+                  Every sync checks for the gaps that quietly break a pipeline — uncataloged or malformed
+                  objects, registry rows whose object is gone, dependency cycles, broken ledger contracts,
+                  schedule drift, out-of-scope databases, and (across accounts) stale or colliding boards —
+                  and lists each on the warnings strip. The full reference is in the collector&apos;s README.
+                </div>
+              </div>
+
+              <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "16px 19px" }}>
+                <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 9 }}>WHERE TO GET IT</div>
+                <div style={{ fontSize: 14.5, lineHeight: 1.65, color: C.text2 }}>
+                  Control Tower is free and open source (MIT). To install it on your own MotherDuck
+                  account, hand its <span style={{ fontFamily: MONO, fontSize: 13 }}>INSTALL.md</span> to the
+                  AI assistant of your choice — it preflights your access, deploys the collector flight,
+                  runs the first sync, and publishes the dive.
+                </div>
+                <a href={REPO_URL} target="_blank" rel="noopener noreferrer"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 13, padding: "9px 14px", borderRadius: 9, border: `1px solid ${C.hairStrong}`, background: C.btnBg, color: C.text, textDecoration: "none", fontSize: 13, fontWeight: 600 }}>
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" /></svg>
+                  View on GitHub
+                </a>
+              </div>
+
+              <div style={{ background: C.panelGrad, border: `1px solid ${C.hair}`, borderRadius: 14, padding: "16px 19px", marginTop: 14 }}>
+                <div style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: ".16em", color: C.faint2, marginBottom: 10 }}>MADE BY</div>
+                <div style={{ fontSize: 14.5, lineHeight: 1.65, color: C.text2, marginBottom: 13 }}>
+                  Control Tower is built by <span style={{ color: C.text, fontWeight: 600 }}>Ryan Dolley</span>. More of my work:
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {([
+                    ["Website", "https://ryandolley.com"],
+                    ["Substack", "https://superdatablog.substack.com"],
+                    ["YouTube", "https://youtube.com/c/superdatabrothers"],
+                    ["LinkedIn", "https://linkedin.com/in/ryandolley"],
+                  ] as [string, string][]).map(([label, href]) => (
+                    <a key={label} href={href} target="_blank" rel="noopener noreferrer"
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 9, border: `1px solid ${C.hairStrong}`, background: C.btnBg, color: C.text, textDecoration: "none", fontSize: 13, fontWeight: 600 }}>
+                      {label}
+                      <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M5 11 L11 5 M6.5 5 H11 V9.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            </div>
           ) : (
             <>
               <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 16, maxWidth: 1140, margin: "0 auto 18px" }}>
@@ -1150,9 +1288,12 @@ export default function ControlTower() {
                   </div>
                   <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.muted2, marginTop: 5 }}>{curCounts}</div>
                 </div>
-                <div style={{ display: "flex", gap: 3, padding: 3, background: C.inset, border: `1px solid ${C.hair}`, borderRadius: 10 }}>
-                  <button onClick={() => setView("logical")} style={segStyle(view === "logical")}>Logical</button>
-                  <button onClick={() => setView("physical")} style={segStyle(view === "physical")}>Physical</button>
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  {freshStamp}
+                  <div style={{ display: "flex", gap: 3, padding: 3, background: C.inset, border: `1px solid ${C.hair}`, borderRadius: 10 }}>
+                    <button onClick={() => setView("logical")} style={segStyle(view === "logical")}>Logical</button>
+                    <button onClick={() => setView("physical")} style={segStyle(view === "physical")}>Physical</button>
+                  </div>
                 </div>
               </div>
 

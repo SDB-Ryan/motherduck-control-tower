@@ -1,55 +1,54 @@
 # Control Tower
 
-A self-updating ops console for a **MotherDuck warehouse** — the data-flow graph
-of the dives, flights, tables, and shares feeding one database, drawn
-automatically from metadata you write into the objects themselves.
+The map and the monitor for your **MotherDuck pipelines** — the data-flow graph
+across your warehouses, with live run health on every job. It charts every dive,
+flight, table, and share and how data moves between them, drawn from a small
+lineage catalog you keep — not a diagram you maintain by hand.
 
 ![Control Tower mapping a MotherDuck account's data flow](docs/control-tower.png)
 
-You annotate each dive and flight with a small `@manifest` comment block declaring
-what it reads, writes, and delivers. A scheduled **manifest-sync** flight parses
-all of them and materializes the graph as tables (`ct_objects`, `ct_edges`,
-`ct_issues`). The **Control Tower** dive renders that graph — per-app lineage, a
-logical/physical toggle, live row counts and run health, and a warnings strip for
-anything not yet cataloged. Zero hardcoded nodes: add a manifest and an object
-joins the graph on the next sync; an object with no manifest shows up on the
-issues list instead.
+## Scope: many warehouses, many accounts
 
-## Scope: one warehouse (for now)
+Control Tower isn't limited to one database. A single board charts every warehouse
+you put in scope (`charted_databases` is a list), and a **main account folds in
+other accounts' boards** over read-only shares — so one graph can span your whole
+MotherDuck footprint, across accounts. Anything targeting a warehouse you haven't
+charted is flagged **out-of-scope** (counted, with the database named) rather than
+forced onto the graph. Control Tower's own `ct_*` bookkeeping tables live in a
+dedicated `control_tower` database; it never modifies your data tables.
 
-Control Tower charts a **single warehouse** — the one database you point it at.
-It discovers every dive and flight in your account, but only charts the objects
-that belong to that warehouse; anything targeting another database is listed as
-**out-of-scope** rather than forced onto the graph. Its own `ct_*` bookkeeping
-tables also live in that database (it never modifies your data tables). A
-multi-warehouse console — one view across several databases, with the `ct_*`
-tables moved into their own dedicated database — is a planned future mode. For
-now, install one Control Tower per warehouse you want to watch.
+## How it works in 30 seconds
+
+You don't draw the graph — you **catalog your objects** and Control Tower draws it.
+You register each object's lineage once — what it reads, writes, and delivers — as a row
+in a `ct_registry` table (via the build-manifest skill, without ever touching the object's
+source). A scheduled collector flight reads the registry plus the live catalog, materializes
+the lineage as `ct_*` tables, and the dive renders it — with row counts, run health, and a
+warnings strip for anything not yet cataloged. Catalog an object, and it appears on the next
+sync. Nothing is hardcoded.
 
 ## How it fits together
 
-```
-your dives & flights  ──(@manifest comments)──►  manifest-sync flight
-                                                        │
-                                          writes  ct_objects / ct_edges / ct_issues
-                                                        │
-                                                        ▼
-                                              Control Tower dive  ──►  the graph
+```mermaid
+flowchart LR
+  A["Your dives &amp; flights<br/><i>cataloged in ct_registry</i>"] --> B["collector flight<br/>(reads the registry)"]
+  B -- "materializes" --> C["ct_objects · ct_edges<br/>ct_issues · ct_health · …"]
+  C --> D["Control Tower dive<br/><b>the live graph</b>"]
 ```
 
 ## What's here
 
 ```
 control-tower/                  the dive (the console UI)
-control-tower-manifest-sync/    the flight that builds the graph from manifests
+control-tower-collector/        the flight that builds the graph from the registry
 INSTALL.md                      step-by-step install guide (hand it to an agent)
 ```
 
 ## Install
 
-Control Tower installs into **one MotherDuck database** and charts the objects
-feeding that warehouse. The whole thing is one flight, one dive, and a handful of
-`ct_*` bookkeeping tables; it never touches your data tables.
+Control Tower installs into your MotherDuck account — one collector flight, one
+dive, and a handful of `ct_*` bookkeeping tables — and charts the warehouses you
+put in scope; it never touches your data tables.
 
 **Load [`INSTALL.md`](INSTALL.md) into the AI assistant of your choice** (Claude,
 ChatGPT, Claude Code — anything that can run MotherDuck SQL) and tell it to
@@ -73,22 +72,22 @@ The three things it checks for, and what to do:
 No skill or framework required — the install uses plain MotherDuck SQL. (If you
 happen to use the `build-dive` skill, its scripts wrap the same calls.)
 
-## The manifest convention
+## The lineage catalog
 
-An object joins the graph by carrying a comment block. Minimal example:
+An object joins the graph by getting a row in the `ct_registry` table — written by
+the **build-manifest skill**, which never edits the object's source. Each row
+declares what the object reads, writes, and delivers:
 
-```python
-# @manifest:begin
-# {
-#   "manifest_version": 1,
-#   "object": "daily-orders-load",
-#   "type": "flight",
-#   "app": "orders",
-#   "database": "analytics",
-#   "reads_from": ["source:shopify"],
-#   "writes_to": ["table:orders"]
-# }
-# @manifest:end
+```json
+{
+  "manifest_version": 1,
+  "object": "daily-orders-load",
+  "type": "flight",
+  "app": "orders",
+  "database": "analytics",
+  "reads_from": ["source:shopify"],
+  "writes_to": ["table:orders"]
+}
 ```
 
 Node refs are `type:name` (`table:`, `share:`, `source:`, `dive:`, `flight:`,

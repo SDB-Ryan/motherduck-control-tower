@@ -22,13 +22,30 @@ and writes the data-flow graph into `control_tower.main`.
 |---|---|
 | `ct_objects` | one row per graph node — code objects (dives/flights) + derived nodes (tables, shares, sources, deliveries, warehouses/databases); carries `source_account` |
 | `ct_edges` | one row per edge per view (`kind` = `physical` \| `logical`) |
-| `ct_issues` | problems: missing-manifest, invalid-manifest, invalid-ledger, schedule-drift, out-of-scope, cycle, `node-collision`, `stale-account` |
+| `ct_issues` | problems: missing-manifest, orphan-registry, invalid-manifest, invalid-ledger, schedule-drift, out-of-scope, cycle, `node-collision`, `stale-account` (see [Issues reference](#issues-reference)) |
 | `ct_health` / `ct_runlog` / `ct_deliveries` | precomputed ops panels (the dive never queries raw ledger tables) |
 | `ct_vitals` | table/view row counts for charted warehouse(s) |
 | `ct_meta` | this account's freshness (`account`, `collected_at`) — drives `stale-account` |
 | `ct_sync_ledger` | the flight's own run health |
 
 `ct_registry` and `ct_hidden` are **not** rebuilt here — the skill / `sync-hidden.py` own them; the collector reads them.
+
+## Issues reference
+
+Everything the collector can write to `ct_issues`, with what triggers it and how to clear it.
+`stale-account` and `node-collision` only occur in the multi-account fold.
+
+| Issue | Severity | Triggers when | Fix |
+|---|---|---|---|
+| `invalid-manifest` | error | A `ct_registry` row is malformed — missing or invalid required fields | Re-catalog the object with `build-manifest` (it validates on write) |
+| `invalid-ledger` | error | An object's declared ledger table/timestamp/status/detail column doesn't exist in the catalog | Fix the ledger fields in the registry to match the real table |
+| `cycle` | error | Dependencies form a loop (physical or logical), so the graph can't be laid out — checked per app and on the merged cross-account graph | Break the loop in the declared `reads_from`/`writes_to` |
+| `missing-manifest` | warning | A deployed dive/flight has no `ct_registry` row (uncataloged) | Catalog it with `build-manifest` |
+| `orphan-registry` | warning | A `ct_registry` row whose object isn't deployed (deleted or renamed) | Remove the stale registry row |
+| `out-of-scope` | warning | Objects target a database not in `CHARTED_DATABASES` — one rollup issue counting them and naming the databases | Add the database to `charted_databases`, or leave it out deliberately |
+| `schedule-drift` | warning | A flight's deployed cron differs from the cron declared in its registry row | Align the registry schedule with the deployed one (or vice versa) |
+| `stale-account` | warning | *(main only)* a folded-in account's shared board is older than `STALE_HOURS` (36h), or its share is attached but unreadable | Check that account's collector is running and its share is valid |
+| `node-collision` | warning | *(main only)* the same node id is defined differently in two folded accounts (this account wins the clash) | Rename one object so ids are unique across accounts |
 
 ## Resolution rules
 

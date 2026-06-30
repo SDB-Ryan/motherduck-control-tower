@@ -8,9 +8,10 @@ to do before any write, and never claim success without verifying.
 
 ## What Control Tower is
 
-A self-updating ops console for your MotherDuck environment — it draws the live data-flow
+The map and the monitor for your MotherDuck pipelines — it draws the live data-flow
 graph (which flights/dives read and write which databases), with health, run history, and
-freshness, and flags what's broken or uncataloged.
+freshness, and flags what's broken or uncataloged. You keep a small lineage catalog; it
+draws and watches the rest.
 
 | Piece | What it is | What it touches |
 |---|---|---|
