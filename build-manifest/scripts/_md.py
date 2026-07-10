@@ -13,6 +13,13 @@ that varies between users lives in data, not code:
 
 This is what makes the skill shareable: a different user writes their own
 config and grows their own `workspace/` folder; the skill code doesn't change.
+
+Public-install fallback (Control Tower OSS): a clean clone of the public repo has
+no dives.config.json. There, discovery falls back to `control-tower.config.json`
+at the repo root, and each account's token comes from the env var named by its
+`token_env` (default: MOTHERDUCK_TOKEN) or a gitignored `.env`. The optional
+`md_user` per account keeps the same identity guard. See find_workspace_root /
+load_config — the private workspace, when present, always wins.
 """
 import argparse
 import hashlib
@@ -33,14 +40,21 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 CONFIG_RELPATH = ("workspace", "dives.config.json")
+PUBLIC_CONFIG = "control-tower.config.json"  # public-install fallback (repo root)
 
 
 # ── Workspace discovery ────────────────────────────────────────────
 
-def find_workspace_root() -> tuple[Path, Path]:
-    """Return (project_root, config_path) by locating dives/dives.config.json upward."""
+def find_workspace_root() -> tuple[Path, Path | None]:
+    """Return (project_root, config_path) by locating dives/dives.config.json upward.
+
+    Fallback (public Control Tower install, no dives.config.json anywhere):
+    locate `control-tower.config.json` upward instead and return (its_dir, None) —
+    load_config() then synthesizes the environments map from it.
+    """
+    starts = (Path.cwd().resolve(), Path(__file__).resolve())
     seen = set()
-    for start in (Path.cwd().resolve(), Path(__file__).resolve()):
+    for start in starts:
         for d in [start] + list(start.parents):
             if d in seen:
                 continue
@@ -48,16 +62,45 @@ def find_workspace_root() -> tuple[Path, Path]:
             cand = d.joinpath(*CONFIG_RELPATH)
             if cand.exists():
                 return d, cand
+    seen = set()
+    for start in starts:
+        for d in [start] + list(start.parents):
+            if d in seen:
+                continue
+            seen.add(d)
+            if (d / PUBLIC_CONFIG).exists():
+                return d, None
     raise FileNotFoundError(
-        "Could not find dives/dives.config.json. Create the workspace first "
-        "(see dive_new.py) or run from inside a project that has one."
+        "Could not find workspace/dives.config.json (a build-dive workspace) or "
+        "control-tower.config.json (a public Control Tower install). For Control "
+        "Tower: copy control-tower.config.example.json to control-tower.config.json "
+        "in the repo root and fill it in, then run from inside the repo."
     )
 
 
 def load_config() -> tuple[Path, dict]:
-    """Return (project_root, config dict)."""
+    """Return (project_root, config dict).
+
+    In a public Control Tower install (no dives.config.json) the environments map
+    is synthesized from control-tower.config.json: each accounts[] entry becomes
+    an environment named by its `env`, reading its token from the env var named by
+    `token_env` (default MOTHERDUCK_TOKEN) or from a gitignored `.env` at the repo
+    root, with the optional `md_user` identity guard preserved.
+    """
     root, cfg_path = find_workspace_root()
-    return root, json.loads(cfg_path.read_text())
+    if cfg_path is not None:
+        return root, json.loads(cfg_path.read_text())
+    ct = json.loads((root / PUBLIC_CONFIG).read_text())
+    environments = {}
+    for a in ct.get("accounts", []):
+        if not a.get("env"):
+            continue
+        entry = {"token_env": a.get("token_env", "MOTHERDUCK_TOKEN")}
+        if a.get("md_user"):
+            entry["md_user"] = a["md_user"]
+        environments[a["env"]] = entry
+    return root, {"environments": environments,
+                  "env_file": ct.get("env_file", ".env")}
 
 
 def dives_dir() -> Path:
@@ -120,7 +163,8 @@ def add_env_arg(parser: argparse.ArgumentParser) -> None:
         "--env",
         required=True,
         choices=choices,
-        help="Which MotherDuck account to use (defined in dives/dives.config.json).",
+        help="Which MotherDuck account to use (an environment from dives.config.json, "
+             "or an accounts[].env from control-tower.config.json in a public install).",
     )
 
 

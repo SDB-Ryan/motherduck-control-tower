@@ -20,15 +20,23 @@ from _ct import find_workspace_root   # noqa: E402
 
 
 def load_collector():
-    root, _ = find_workspace_root()
-    pattern = str(root / "workspace" / "**" / "flight.py")
-    for p in glob.glob(pattern, recursive=True):
-        if "SCHEMA MIRROR START" in open(p).read():
-            spec = importlib.util.spec_from_file_location("collector_flight", p)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod, p
-    raise SystemExit("no collector flight with a SCHEMA MIRROR found under workspace/")
+    try:
+        root, _ = find_workspace_root()
+    except FileNotFoundError:
+        root = None
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    roots = [str(r) for r in (root, repo) if r]
+    patterns = [os.path.join(r, sub, "**", "flight.py")
+                for r in roots for sub in ("workspace", "")]
+    for pattern in patterns:
+        for p in glob.glob(pattern, recursive=True):
+            if "SCHEMA MIRROR START" in open(p).read():
+                spec = importlib.util.spec_from_file_location("collector_flight", p)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod, p
+    raise SystemExit("no collector flight with a SCHEMA MIRROR found "
+                     "(searched workspace/ and the repo tree)")
 
 
 CASES = [

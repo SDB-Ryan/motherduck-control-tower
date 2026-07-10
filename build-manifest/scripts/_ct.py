@@ -5,12 +5,14 @@ Two jobs:
      that refuses to write to the wrong account) without duplicating it. During
      development the two skills sit side by side under ~/.claude/skills/; the OSS
      publish step vendors a copy of _md so the shipped skill is self-contained.
-  2. Load `workspace/control-tower.config.json` — the account topology — and
+  2. Load `control-tower.config.json` — the account topology — and
      expose the per-account entry + the canonical/slice schema names.
 
---env here selects a Control Tower ACCOUNT (from control-tower.config.json),
-whose `env` must also exist in dives.config.json so `connect()`'s identity guard
-applies.
+--env here selects a Control Tower ACCOUNT (from control-tower.config.json).
+In the private workspace the same `env` also exists in dives.config.json, which
+supplies the token + identity guard; in a public install `_md` falls back to
+control-tower.config.json itself (token from MOTHERDUCK_TOKEN or `token_env`,
+optional `md_user` guard) — one config file, no other workspace needed.
 """
 
 import argparse
@@ -31,13 +33,19 @@ CT_CONFIG_RELPATH = ("workspace", "control-tower.config.json")
 
 
 def load_ct_config():
-    """Return (project_root, control-tower.config dict)."""
+    """Return (project_root, control-tower.config dict).
+
+    Looks in the private workspace location (control-tower.config.json)
+    first, then at the project root (the public-install location).
+    """
     root, _ = find_workspace_root()
-    p = root.joinpath(*CT_CONFIG_RELPATH)
-    if not p.exists():
-        raise SystemExit(
-            f"\n  ✗ {p} not found. Control Tower's topology config is required.\n")
-    return root, json.loads(p.read_text())
+    for p in (root.joinpath(*CT_CONFIG_RELPATH), root / "control-tower.config.json"):
+        if p.exists():
+            return root, json.loads(p.read_text())
+    raise SystemExit(
+        "\n  ✗ control-tower.config.json not found. Control Tower's topology config "
+        "is required — copy control-tower.config.example.json to "
+        "control-tower.config.json (repo root) and fill it in.\n")
 
 
 def account_entry(ct_cfg, env):

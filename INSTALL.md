@@ -18,7 +18,7 @@ draws and watches the rest.
 | `control-tower-collector` | a Flight (scheduled Python) — **one per account** | reads the catalog + the warehouse(s) you chart + a registry table; writes the graph tables (`ct_objects`, `ct_edges`, `ct_issues`, `ct_health`, `ct_runlog`, `ct_deliveries`, `ct_vitals`) into a `control_tower` database |
 | `control-tower` | a Dive (the console UI) | reads only `control_tower.main` |
 | `ct_registry` | a table | the declared lineage of your objects — authored by the skill, **not** stored in your objects' source |
-| the `build-manifest` skill | how cataloging happens | reads each object's code and writes `ct_registry` rows |
+| the `build-manifest` skill | how cataloging happens — the `build-manifest/` folder in this repo | reads each object's code and writes `ct_registry` rows |
 
 **There is no separate "manifest" you edit into your code, and no separate merge flight.**
 Lineage lives in `ct_registry`; the collector reads it. For multiple accounts, each account
@@ -41,10 +41,11 @@ user's choice** — set by *which databases they chart*, never by hand-editing t
 
 ## How to run the commands (pick one before Preflight)
 
-Same as any MotherDuck SQL/flight work. **Recommended: a local `duckdb` CLI** (>= 1.5.3 —
-MotherDuck rejects newer; grab 1.5.3 from DuckDB releases if `brew` gives you a newer one)
-connected with the user's token, run from the folder holding the source files so
-`read_text(...)` resolves. **Fallback: the MotherDuck MCP** — but `read_text()` won't work
+Same as any MotherDuck SQL/flight work. **Recommended: a local `duckdb` CLI, version
+1.5.3** — the version Control Tower is tested with: older clients lack the `MD_*` flight
+functions entirely, and MotherDuck can refuse clients newer than it supports (if `brew`
+gives you a newer one, grab 1.5.3 from the DuckDB releases page). Connect with the user's
+token and run from the folder holding the source files so `read_text(...)` resolves. **Fallback: the MotherDuck MCP** — but `read_text()` won't work
 server-side, so pass file contents inline to `create_flight`/`save_dive`, and verify pushes
 with `md5()` + `strlen()`.
 
@@ -66,22 +67,33 @@ Establish these in order; if one fails, STOP, name the holdup + fix, and wait.
 
 ## Step 1 — Stamp the config
 
-Set, in `control-tower.config.json` and stamped into `flight.py` at deploy:
+Copy `control-tower.config.example.json` → `control-tower.config.json` (repo root) and fill
+it in; then set the same values by **editing the constants at the top of `flight.py`** (the
+"stamped at deploy" block — there is no separate stamping tool):
 `ACCOUNT` (this account's name), `CT_DATABASE` (default `control_tower`), `SCHEMA` (`main`),
 `CHARTED_DATABASES` (the list from Preflight 4), `IS_MAIN` (true on the account that hosts the
-dive), `INBOUND_SHARES` (empty for now — Step 6). The dive's `DB` constant = `control_tower`.
+dive), `INBOUND_SHARES` (empty for now — Step 6). The dive's `DB` constant is already
+`control_tower`. For the helper scripts, export the token as `MOTHERDUCK_TOKEN` (or name a
+per-account `token_env` in the config); setting the optional `md_user` per account makes
+every script verify the live account identity and refuse a mismatch before writing.
 
 ## Step 2 — Create the database + deploy the collector
 
-1. `registry_init.py --env <acct>` (or the SQL it runs): creates `control_tower`, the `main`
-   schema, and an empty `ct_registry`.
+1. `build-manifest/scripts/registry_init.py --env <acct>` (token via `MOTHERDUCK_TOKEN`) —
+   or run the same SQL by hand: `CREATE DATABASE IF NOT EXISTS control_tower;`,
+   `CREATE SCHEMA IF NOT EXISTS control_tower.main;`, then the `ct_registry` DDL
+   (`REGISTRY_DDL` in `build-manifest/scripts/_manifest_schema.py`).
 2. Deploy the collector with `MD_CREATE_FLIGHT` (name `control-tower-collector`, the
    `read_write` token, schedule e.g. `30 13 * * *` UTC). Verify the upload landed
    (`source_code = ...` from `MD_LIST_FLIGHT_VERSIONS`).
 
 ## Step 3 — Catalog your environment (the real install)
 
-Run the **`build-manifest`** skill against this account. For each deployed object that has no
+Run the **`build-manifest`** skill against this account. The skill is not tool-specific:
+it's the `build-manifest/` folder in this repo. If your assistant loads skills natively
+(e.g. Claude Code), install/invoke it; with any other assistant (ChatGPT, etc.), open
+`build-manifest/SKILL.md` and follow it top to bottom as instructions — the scripts it
+references live in `build-manifest/scripts/`. For each deployed object that has no
 registry row, the skill:
 1. pulls its source (`MD_GET_DIVE` / `MD_LIST_FLIGHT_VERSIONS`) — **read-only**,
 2. **reads the code** and determines honestly what it reads/writes — tables (`table:x`),
@@ -117,7 +129,7 @@ Control Tower spans accounts **through read-only shares — no data is copied, o
 
 1. **On each non-main account:** do Steps 1–5 (it gets its own collector + its own
    `control_tower` + can host its own dive of just its objects), then **share its
-   `control_tower`** read-only to the main account (`dive_share.py` / `CREATE SHARE`,
+   `control_tower`** read-only to the main account (plain SQL: `CREATE SHARE` with
    `UPDATE AUTOMATIC`).
 2. **On the main account:** add each inbound share to the collector's `INBOUND_SHARES`
    (`{"alias","url"}`) and redeploy. On its next run the main collector DETACH/ATTACHes each

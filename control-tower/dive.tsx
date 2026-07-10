@@ -12,7 +12,7 @@ const MONO = "ui-monospace, Menlo, Consolas, monospace";
 const SERIF = "Georgia, 'Times New Roman', serif";
 
 const DB = "control_tower";                    // canonical Control Tower DB the dive reads (all ct_* tables)
-const WAREHOUSE = "YOUR_DATABASE";  // fallback only: a table with no database collapses here. Normally each table collapses into warehouse:<its own database>, so a board can show N warehouses.
+const WAREHOUSE = "uncharted";  // fallback only: a table with no database collapses into a node with this label. Normally each table collapses into warehouse:<its own database>, so a board can show N warehouses.
 
 // About tab: a "what is this / how it works / where to get it" pane. Ships in both the
 // gallery dive and the OSS download. Set to false to hide it.
@@ -971,7 +971,7 @@ export default function ControlTower() {
   const freshStamp = (
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: MONO, fontSize: 11, color: C.muted }} title="When manifest-sync last rebuilt the graph">
+        <span style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: MONO, fontSize: 11, color: C.muted }} title="When the collector last rebuilt the graph">
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.accent, animation: MOTION ? "ctsync 2.4s ease-in-out infinite" : "none" }} />
           {syncRow && syncRow.synced_at ? `Synced ${String(syncRow.synced_at)} UTC` : "Not synced"}
         </span>
@@ -1127,7 +1127,7 @@ export default function ControlTower() {
                 </div>
               ) : fullGraph.cyclic || fullLayout.degraded || cycleIssues.length ? (
                 <GraphErrorPanel maxW={1180} title="Environment graph can’t be drawn — dependency cycle"
-                  intro="The environment contains a dependency loop, so the merged graph can’t be laid out. Fix the cycle in the manifests and re-run manifest-sync."
+                  intro="The environment contains a dependency loop, so the merged graph can’t be laid out. Fix the cycle in the cataloged lineage and re-run the collector."
                   details={cycleIssues.map((i) => String(i.detail))}
                   nodeIds={fullGraph.nodeIds} nameOf={nameOf} />
               ) : (
@@ -1299,11 +1299,11 @@ export default function ControlTower() {
 
               {!graph || !layout ? (
                 <div style={{ maxWidth: 1140, margin: "0 auto", borderRadius: 16, border: `1px solid ${C.hair}`, background: C.board, padding: 28 }}>
-                  <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted2 }}>{objectsQ.isLoading ? "Loading…" : "No objects in this app yet — run manifest-sync after deploying."}</span>
+                  <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted2 }}>{objectsQ.isLoading ? "Loading…" : "No objects in this app yet — run the collector flight after deploying."}</span>
                 </div>
               ) : graph.cyclic || layout.degraded || appCycle.length ? (
                 <GraphErrorPanel maxW={1140} title="Lineage can’t be drawn — dependency cycle"
-                  intro="This app’s lineage contains a dependency loop, so the board can’t be laid out. Fix the cycle in the manifests and re-run manifest-sync."
+                  intro="This app’s lineage contains a dependency loop, so the board can’t be laid out. Fix the cycle in the cataloged lineage and re-run the collector."
                   details={appCycle.map((i) => String(i.detail))}
                   nodeIds={graph.nodeIds} nameOf={nameOf} />
               ) : renderBoard(graph, layout)}

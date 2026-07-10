@@ -1,22 +1,27 @@
 {
-  "_comment": "Control Tower account topology. Copy to control-tower.config.json and fill in. ONE flight per account (the collector) — no merge flight. Each account writes its graph into <ct_database>.<schema>; for multiple accounts, each non-main account shares its control_tower and the main account's collector folds the shares in. 'env' values must match your build-dive dives.config.json so account identity is verified on every write. Single account = just collect -> write (drop the extra accounts[] entries).",
+  "_comment": "Control Tower account topology. Copy to control-tower.config.json (repo root) and fill in. ONE flight per account (the collector) — no merge flight. Each account writes its graph into <ct_database>.<schema>; for multiple accounts, each non-main account shares its control_tower and the main account's collector folds the shares in. Single account = keep only the first accounts[] entry. The helper scripts read each account's token from the env var named by its token_env (default MOTHERDUCK_TOKEN), falling back to a gitignored .env file (env_file). Set the optional md_user to that account's `SELECT md_user()` value and every script will verify it's connected to the right account — and refuse — before writing.",
   "main_env": "main",
   "schema": "main",
+  "env_file": ".env",
   "accounts": [
     {
       "env": "main",
       "is_main": true,
       "ct_database": "control_tower",
       "charted_databases": ["YOUR_DATABASE"],
-      "share_name": "control_tower_main"
+      "share_name": "control_tower_main",
+      "token_env": "MOTHERDUCK_TOKEN",
+      "md_user": ""
     },
     {
-      "_comment": "Optional additional account (a producer). It runs its own collector and shares its control_tower; the main account's collector folds it in via INBOUND_SHARES (stamped at deploy).",
+      "_comment": "Optional additional account (a producer). It runs its own collector and shares its control_tower; the main account's collector folds it in via INBOUND_SHARES (stamped at deploy). token_env names a different env var so the two tokens can't cross.",
       "env": "second_account",
       "is_main": false,
       "ct_database": "control_tower",
       "charted_databases": ["YOUR_OTHER_DATABASE"],
-      "share_name": "control_tower_second"
+      "share_name": "control_tower_second",
+      "token_env": "MOTHERDUCK_TOKEN_SECOND",
+      "md_user": ""
     }
   ]
 }

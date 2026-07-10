@@ -13,3 +13,6 @@ venv/
 
 # Local working notes / session log — never versioned (may name accounts)
 SESSION_LOG.md
+
+# Local assistant config — never versioned (holds machine-local paths)
+.claude/

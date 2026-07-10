@@ -6,15 +6,14 @@ skill — *not* parsed from object source), enumerates the account's deployed di
 reconcile + pull run history, reads the charted warehouse(s) and any ledger tables locally,
 and writes the data-flow graph into `control_tower.main`.
 
-- **Environment:** main (the `main` account)
+- **Environment:** main
 - **CT database / schema:** `control_tower.main` (the dive reads this)
 - **Charted warehouse(s):** `YOUR_DATABASE`
 - **Own ledger:** `ct_sync_ledger`
 - **Schedule:** daily `30 13 * * *` UTC
 
-> The deployed flight is still named `control-tower-manifest-sync` (historical); its role is
-> the collector. Stamped constants (per account): `ACCOUNT`, `CT_DATABASE`, `SCHEMA`,
-> `CHARTED_DATABASES`, `IS_MAIN`, `INBOUND_SHARES`.
+> Stamped constants (per account, edited at the top of `flight.py` at deploy): `ACCOUNT`,
+> `CT_DATABASE`, `SCHEMA`, `CHARTED_DATABASES`, `IS_MAIN`, `INBOUND_SHARES`.
 
 ## What it writes (all into `control_tower.main`, rebuilt atomically per run + count-verified)
 
@@ -28,7 +27,7 @@ and writes the data-flow graph into `control_tower.main`.
 | `ct_meta` | this account's freshness (`account`, `collected_at`) — drives `stale-account` |
 | `ct_sync_ledger` | the flight's own run health |
 
-`ct_registry` and `ct_hidden` are **not** rebuilt here — the skill / `sync-hidden.py` own them; the collector reads them.
+`ct_registry` and `ct_hidden` are **not** rebuilt here — `build-manifest` writes the registry, and `ct_hidden` is maintained directly (one row per intentionally-untracked object: `object_key`, `reason`); the collector only reads them.
 
 ## Issues reference
 
@@ -76,5 +75,5 @@ re-collects its own graph fresh and only *reads* the other accounts' (different)
   (it reads the object's code and writes the row; it never edits the object's source). Check
   `ct_issues`.
 - `MD_GET_FLIGHT` returns metadata only; flight source comes from `MD_LIST_FLIGHT_VERSIONS`.
-- Manual run: `flight_run.py --name databases/YOUR_DATABASE/control-tower-manifest-sync`
-  (needs the duckdb>=1.5.3 venv). Local dry-run: run `flight.py` with `motherduck_token` set.
+- Manual run: trigger it with `MD_RUN_FLIGHT` (SQL). Local dry-run: run `flight.py`
+  directly with the `motherduck_token` env var set (duckdb 1.5.3).

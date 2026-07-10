@@ -7,14 +7,15 @@ local files). A test (test_schema_parity.py) diffs the inlined copy against this
 module so the two never silently drift — see Key Risk #4 in the plan.
 
 The parse_manifest / validate logic here is byte-for-byte the same contract as
-the original control-tower flight.py and build-dive's manifest_check.py, so an
-object cataloged via the registry validates identically to one declared in source.
+the Control Tower collector flight, so a row cataloged via the registry validates
+identically to what the collector expects. This is now the single owner of the
+manifest contract (build-dive's old manifest_check.py has been retired).
 """
 
 import json
 import re
 
-# ── manifest contract (identical to flight.py / manifest_check.py) ──────────
+# ── manifest contract (matches the Control Tower collector flight) ──────────
 
 MARKER_RE = re.compile(r"@manifest:begin(.*?)@manifest:end", re.DOTALL)
 COMMENT_PREFIX_RE = re.compile(r"^\s*(#|//|\*)\s?")

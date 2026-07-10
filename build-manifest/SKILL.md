@@ -18,11 +18,11 @@ Catalog objects into Control Tower's **registry table** so the data-flow graph c
 them — without ever touching the object's source. Three principles:
 
 1. **Non-invasive.** This skill only writes `ct_registry` rows. It NEVER edits a dive's or
-   flight's deployed source. (That is the whole reason it exists — Bill couldn't edit his
-   production dives to add manifest comments.)
+   flight's deployed source. (That is the whole reason it exists — so production objects
+   you can't or won't edit can still be cataloged.)
 2. **Never write to the wrong account.** Every operation goes through a script with an
-   explicit `--env`, and `connect()` verifies the live `md_user()` against
-   `control-tower.config.json` / `dives.config.json` and refuses on mismatch.
+   explicit `--env`, and `connect()` verifies the live `md_user()` against the account's
+   configured identity (the `md_user` field in the config) and refuses on mismatch.
 3. **The registry is the single truth, validated once.** Rows are validated with the same
    `validate()` the collector uses (`scripts/_manifest_schema.py`), so a row that would
    break the graph is rejected at write time, not discovered later on the board.
@@ -30,10 +30,12 @@ them — without ever touching the object's source. Three principles:
 ## How this fits Control Tower
 
 Each account runs a **collector flight** that reads its `ct_registry`, enumerates that
-account's deployed objects, and writes its slice of `ct_objects/ct_edges/ct_issues`
-(+ precomputed health/runlog/deliveries/vitals). The main account's **merge flight** unions
-all slices into one canonical set the **dive** renders. This skill is the *authoring* side:
-it fills `ct_registry`. See `workspace/control-tower.config.json` for the account topology.
+account's deployed objects, and writes the graph tables (`ct_objects/ct_edges/ct_issues`
++ precomputed health/runlog/deliveries/vitals). There is **no separate merge flight**: on
+the main account, the same collector also folds in the other accounts' shared
+`control_tower` databases before writing — one board, which the **dive** renders. This
+skill is the *authoring* side: it fills `ct_registry`. See
+`control-tower.config.json` for the account topology.
 
 A manifest registry row replaces the old in-source `@manifest` block. Same fields, same
 validation — different home (a table, per account).
@@ -41,13 +43,13 @@ validation — different home (a table, per account).
 ## Step 0 — ASK which account, every time
 
 Ask the user **which Control Tower account** to work in (the `env` values in
-`workspace/control-tower.config.json`). Pass it as `--env` to every script. Identity is
+`control-tower.config.json`). Pass it as `--env` to every script. Identity is
 verified, never assumed — the same person can show different `md_user()` across accounts.
 
 ## Workflow
 
 1. **`registry_init.py --env X`** once per account — creates the account's Control Tower
-   database, slice schema, and empty `ct_registry`. Idempotent.
+   database, schema, and empty `ct_registry`. Idempotent.
 2. **`registry_scan.py --env X`** — the to-do list: which deployed objects are
    **uncataloged**, which registry rows are **orphans**, which flights have **schedule
    drift**. Use `--json` to consume it programmatically.
@@ -68,9 +70,10 @@ verified, never assumed — the same person can show different `md_user()` acros
    manifest that lies is worse than none.
 5. **`registry_upsert.py --env X --file draft.json`** — validates, writes transactionally,
    verifies. Accepts one object or a list.
-6. **Confirm it rendered:** trigger the collector (`flight_run.py` from build-dive) and
-   check the object now appears and its `missing-manifest` issue cleared — **and that its
-   source is unchanged** (diff the deployed source; it must be byte-identical).
+6. **Confirm it rendered:** trigger the collector — `MD_RUN_FLIGHT` via SQL (or
+   build-dive's `flight_run.py` where that workspace exists) — and check the object now
+   appears and its `missing-manifest` issue cleared — **and that its source is unchanged**
+   (diff the deployed source; it must be byte-identical).
 
 ## Manifest schema (v1)
 
@@ -89,9 +92,9 @@ The row you draft for `registry_upsert.py` is a manifest object plus optional
   "schedule": "15 9 * * *",                  // flights; keep == deployed cron
   "stale_hours": 36,                          // optional, flights only
   "url": "https://app.motherduck.com/flights",
-  "reads_from":  ["table:dow_pl_detail", "share:upstream", "source:yahoo-finance"],
+  "reads_from":  ["table:report_detail", "share:upstream", "source:market-data"],
   "writes_to":   ["table:burst_notify_ledger"],
-  "delivers_for": ["dive:financial-briefing-book-burst"],
+  "delivers_for": ["dive:briefing-book-burst"],
   "feeds":       ["delivery:email-distribution"],
   "ledger": {
     "table": "burst_notify_ledger", "ts_column": "sent_ts",
@@ -114,7 +117,7 @@ real for everyone. **Scope is the user's choice, not yours to hand-edit:** what 
 Tower covers is set by the account's `charted_databases` (chart 3 or chart 45 — their
 call), never by deleting edges from the graph. Don't declare what the catalog already knows
 (share↔database wiring, deployed schedules, row counts — the collector derives those). Full
-reference: build-dive's `references/manifest.md`.
+reference: `references/manifest.md`.
 
 ## Scripts
 
@@ -128,11 +131,11 @@ reference: build-dive's `references/manifest.md`.
 | `scripts/_ct.py` | Loads `control-tower.config.json` and reuses build-dive's `_md.connect` (md_user-verified). |
 
 ```bash
-S=.claude/skills/build-manifest/scripts
+S=build-manifest/scripts
 python3 $S/registry_init.py   --env main
 python3 $S/registry_scan.py   --env main
 python3 $S/registry_upsert.py --env main --file draft.json
-python3 $S/registry_pull.py   --env main --out workspace/control-tower/registry.main.json
+python3 $S/registry_pull.py   --env main --out registry.main.json
 ```
 
 ## Notes
@@ -141,5 +144,6 @@ python3 $S/registry_pull.py   --env main --out workspace/control-tower/registry.
   `@manifest` blocks. `parse_manifest()` in `_manifest_schema.py` reads them; feed the
   parsed dicts (with `deployed_name` set) to `registry_upsert.py` to move them into the
   registry, then the collector reads the registry instead of the source.
-- This skill reuses build-dive's `flight_run.py` to trigger the collector. During OSS
-  publish, `_md.py` is vendored into this skill so it ships self-contained.
+- Triggering the collector needs nothing special: `MD_RUN_FLIGHT` via SQL (in the private
+  workspace, build-dive's `flight_run.py` wraps the same call). During OSS publish,
+  `_md.py` is vendored into this skill so it ships self-contained.

@@ -39,9 +39,11 @@ flowchart LR
 ## What's here
 
 ```
-control-tower/                  the dive (the console UI)
-control-tower-collector/        the flight that builds the graph from the registry
-INSTALL.md                      step-by-step install guide (hand it to an agent)
+control-tower/                     the dive (the console UI)
+control-tower-collector/           the flight that builds the graph from the registry
+build-manifest/                    the cataloging skill: SKILL.md + the registry scripts
+control-tower.config.example.json  account topology template (copy → control-tower.config.json)
+INSTALL.md                         step-by-step install guide (hand it to an agent)
 ```
 
 ## Install
@@ -69,8 +71,9 @@ The three things it checks for, and what to do:
   result, the graph just refreshes when you run the sync script rather than on a
   schedule. (Or upgrade for scheduling.)
 
-No skill or framework required — the install uses plain MotherDuck SQL. (If you
-happen to use the `build-dive` skill, its scripts wrap the same calls.)
+No framework required — the install uses plain MotherDuck SQL, and the cataloging
+step is driven by the `build-manifest/` folder in this repo (readable instructions
+plus a few small Python scripts; works with any assistant).
 
 ## The lineage catalog
 
@@ -92,7 +95,8 @@ declares what the object reads, writes, and delivers:
 
 Node refs are `type:name` (`table:`, `share:`, `source:`, `dive:`, `flight:`,
 `delivery:`). Full field reference and the logical-vs-physical edge rules are in
-**INSTALL.md** (Step 5).
+**`build-manifest/references/manifest.md`**; the cataloging workflow is
+`build-manifest/SKILL.md`.
 
 ## License
 
