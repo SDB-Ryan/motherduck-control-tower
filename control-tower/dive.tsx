@@ -514,6 +514,76 @@ function NetworkView({ lay, statusFn, infoFn }: { lay: LayoutT; statusFn: (id: s
   );
 }
 
+// Pan/zoom shell for the per-app lineage board — same interaction as the
+// Overview network (scroll-zoom at cursor, drag-pan, fit/reset buttons).
+// Children are the boardW×boardH board content on a CSS-transformed layer;
+// `legend` stays pinned in the viewport corner, unscaled. Board cards are
+// links, so a drag that starts on a card swallows the click on release.
+function BoardViewport({ boardW, boardH, legend, children }: { boardW: number; boardH: number; legend?: any; children: any }) {
+  const { C } = useTheme();
+  const [vt, setVt] = useState({ s: 1, x: 24, y: 16 });
+  const [grab, setGrab] = useState(false);
+  const dragRef = useRef<{ x0: number; y0: number; vx: number; vy: number; moved: boolean } | null>(null);
+  const suppressClick = useRef(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const VH = Math.min(Math.max(boardH + 48, 360), 620);
+
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      setVt((v) => {
+        const s = Math.max(0.35, Math.min(2.6, v.s * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+        const k = s / v.s;
+        return { s, x: mx - (mx - v.x) * k, y: my - (my - v.y) * k };
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Fit the whole board in view — on mount, on board change, and via the reset button.
+  const fit = () => {
+    const el = wrapRef.current; if (!el) return;
+    const w = el.clientWidth;
+    const s = Math.max(0.35, Math.min(1, (w - 48) / boardW, (VH - 48) / boardH));
+    setVt({ s, x: (w - boardW * s) / 2, y: Math.max(16, (VH - boardH * s) / 2) });
+  };
+  useEffect(() => { fit(); }, [boardW, boardH]);
+
+  const zoom = (f: number) => setVt((v) => ({ ...v, s: Math.max(0.35, Math.min(2.6, v.s * f)) }));
+  const onDown = (e: any) => { dragRef.current = { x0: e.clientX, y0: e.clientY, vx: vt.x, vy: vt.y, moved: false }; setGrab(true); };
+  const onMove = (e: any) => {
+    const d = dragRef.current; if (!d) return;
+    const dx = e.clientX - d.x0, dy = e.clientY - d.y0;
+    if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+    setVt((v) => ({ ...v, x: d.vx + dx, y: d.vy + dy }));
+  };
+  const onUp = () => { if (dragRef.current?.moved) suppressClick.current = true; dragRef.current = null; setGrab(false); };
+  const onClickCapture = (e: any) => { if (suppressClick.current) { e.preventDefault(); e.stopPropagation(); suppressClick.current = false; } };
+
+  return (
+    <div ref={wrapRef} onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp} onClickCapture={onClickCapture}
+      style={{ position: "relative", height: VH, borderRadius: 16, overflow: "hidden", border: `1px solid ${C.hair}`, background: C.board, backgroundImage: `radial-gradient(${C.gridDot} 1px, transparent 1px)`, backgroundSize: "24px 24px", boxShadow: C.boardShadow, cursor: grab ? "grabbing" : "grab", userSelect: "none" }}>
+      <div style={{ position: "absolute", left: 0, top: 0, width: boardW, height: boardH, transform: `translate(${vt.x}px, ${vt.y}px) scale(${vt.s})`, transformOrigin: "0 0" }}>
+        {children}
+      </div>
+      {legend ? <div style={{ position: "absolute", top: 14, right: 16 }}>{legend}</div> : null}
+      <div style={{ position: "absolute", left: 14, bottom: 14, display: "flex", gap: 6 }}>
+        {([["+", 1.2], ["−", 1 / 1.2]] as [string, number][]).map(([lab, f]) => (
+          <button key={lab} onClick={() => zoom(f)} style={{ width: 30, height: 30, borderRadius: 8, border: `1px solid ${C.hair}`, background: C.btnBg, color: C.muted, cursor: "pointer", fontSize: 16, lineHeight: 1 }}>{lab}</button>
+        ))}
+        <button onClick={fit} title="Reset view" style={{ width: 30, height: 30, borderRadius: 8, border: `1px solid ${C.hair}`, background: C.btnBg, color: C.muted, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 6 V3 H6 M10 3 H13 V6 M13 10 V13 H10 M6 13 H3 V10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </button>
+      </div>
+      <div style={{ position: "absolute", right: 16, bottom: 14, fontFamily: MONO, fontSize: 10, color: C.faint }}>scroll to zoom · drag to pan</div>
+    </div>
+  );
+}
+
 function ThemeIcon({ theme }: { theme: "light" | "dark" }) {
   if (theme === "dark") {
     return (
@@ -899,9 +969,19 @@ export default function ControlTower() {
   function renderBoard(g: GraphT, lay: LayoutT) {
     let conn: Set<string> | null = null;
     if (hover) { conn = new Set([hover]); for (const e of lay.edges) { if (e.src === hover) conn.add(e.dst); if (e.dst === hover) conn.add(e.src); } }
+    const legend = (
+      <div style={{ background: C.glassBg, border: `1px solid ${C.hair}`, borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 7 }}>
+        {([["Flowing", edgeStyle("ok", false)], ["Stale", edgeStyle("warn", false)], ["Failing", edgeStyle("fail", false)], ["Idle", edgeStyle("idle", false)]] as [string, any][]).map(([lab, s]) => (
+          <div key={lab} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <svg width="18" height="6"><line x1="0" y1="3" x2="18" y2="3" stroke={s.stroke} strokeWidth="2" strokeDasharray={s.dash} strokeLinecap="round" /></svg>
+            <span style={{ fontFamily: MONO, fontSize: 10, color: C.muted }}>{lab}</span>
+          </div>
+        ))}
+      </div>
+    );
     return (
-      <div style={{ overflowX: "auto" }}>
-        <div style={{ position: "relative", width: lay.boardW, height: lay.boardH, margin: "0 auto", borderRadius: 16, overflow: "hidden", background: C.board, backgroundImage: `radial-gradient(${C.gridDot} 1px, transparent 1px)`, backgroundSize: "24px 24px", border: `1px solid ${C.hair}`, boxShadow: C.boardShadow }}>
+      <div style={{ maxWidth: 1140, margin: "0 auto" }}>
+        <BoardViewport boardW={lay.boardW} boardH={lay.boardH} legend={legend}>
           <svg width={lay.boardW} height={lay.boardH} viewBox={`0 0 ${lay.boardW} ${lay.boardH}`} style={{ position: "absolute", inset: 0 }}>
             {Array.from({ length: lay.maxCol }, (_, s) => CX0 + (s + 0.5) * PITCH).map((x, i) => (
               <line key={i} x1={x} y1={26} x2={x} y2={lay.boardH - 26} stroke={C.gridLine} strokeWidth={1} />
@@ -916,15 +996,7 @@ export default function ControlTower() {
             })}
           </svg>
           {[...lay.pos.keys()].map((id) => renderNodeCardG(id, g, lay, conn))}
-          <div style={{ position: "absolute", top: 14, right: 16, background: C.glassBg, border: `1px solid ${C.hair}`, borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 7 }}>
-            {([["Flowing", edgeStyle("ok", false)], ["Stale", edgeStyle("warn", false)], ["Failing", edgeStyle("fail", false)], ["Idle", edgeStyle("idle", false)]] as [string, any][]).map(([lab, s]) => (
-              <div key={lab} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <svg width="18" height="6"><line x1="0" y1="3" x2="18" y2="3" stroke={s.stroke} strokeWidth="2" strokeDasharray={s.dash} strokeLinecap="round" /></svg>
-                <span style={{ fontFamily: MONO, fontSize: 10, color: C.muted }}>{lab}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        </BoardViewport>
       </div>
     );
   }
